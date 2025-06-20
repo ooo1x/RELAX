@@ -5,8 +5,6 @@ from geometry_msgs.msg import Pose, PoseStamped
 from std_msgs.msg import Float32MultiArray, Int32
 from gymnasium import Env,spaces
 
-
-
 class FrankaRLEnv(Env):
     def __init__(self):
         super(FrankaRLEnv, self).__init__()
@@ -21,8 +19,8 @@ class FrankaRLEnv(Env):
         self.arm.set_max_acceleration_scaling_factor(0.1)
 
         # Set 2 goals
-        self.goal1 = np.array([0.5, -0.2, 0.72])
-        self.goal2 = np.array([0.5,  0.2, 0.72])
+        self.goal1 = np.array([0.6, -0.2, 1.42])
+        self.goal2 = np.array([0.6,  0.2, 1.42])
 
         # Set state space: ee_x, ee_y, ee_z, dx1, dy1, dz1, dx2, dy2, dz2, fault_flag
         obs_high = np.array([2.0] * 10, dtype=np.float32)
@@ -30,6 +28,7 @@ class FrankaRLEnv(Env):
 
         # Set action space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        self.MAX_DELTA = 0.05
 
         self.ee_position = np.zeros(3, dtype=np.float32)
 
@@ -40,9 +39,13 @@ class FrankaRLEnv(Env):
         rospy.Subscriber("/ee_pose", PoseStamped, self.ee_callback)
         rospy.Subscriber("/fault_flag", Int32, self.fault_callback)
 
+        self.current_state = 0  # Initial state(in RELAX DEMO)
+        rospy.Subscriber("/pose_state", Int32, self.state_callback)
+        self.dummy_sent = False
+
         self.reset()
         rospy.loginfo("FrankaRLEnv initialized")
-    
+
     def ee_callback(self,msg):
         self.ee_position = np.array((msg.pose.position.x,
                                     msg.pose.position.y,
@@ -50,6 +53,9 @@ class FrankaRLEnv(Env):
     
     def fault_callback(self, msg):
         self.fault_flag = msg.data
+
+    def state_callback(self, msg):
+        self.current_state = msg.data
 
     def _get_observation(self):
         ee_position = self.ee_position
@@ -60,7 +66,7 @@ class FrankaRLEnv(Env):
     def _compute_reward(self, obs):
         distance_to_goal1 = np.linalg.norm(obs[3:6])
         distance_to_goal2 = np.linalg.norm(obs[6:9])
-        reward = -min(distance_to_goal1, distance_to_goal2)
+        reward = min(distance_to_goal1, distance_to_goal2)
         if distance_to_goal1 < 0.02 or distance_to_goal2 < 0.02:
             reward -= 5.0  
         if self.fault_flag > 0:
@@ -81,15 +87,25 @@ class FrankaRLEnv(Env):
         return obs, {}  
     
     def step(self, action):
-        msg = Float32MultiArray(data=action.tolist())
-        self.action_pub.publish(msg)
-        rospy.sleep(0.1)
+        if self.current_state in (3, 4, 5, 6):
+            delta = np.clip(action, -1.0, 1.0) * self.MAX_DELTA
+            msg = Float32MultiArray(data=delta.astype(np.float32).tolist())
+            self.action_pub.publish(msg)
+        else:
+            if not self.dummy_sent:
+                self.action_pub.publish(Float32MultiArray(data=[0.0, 0.0, 0.0]))
+                self.dummy_sent = True
+
+        rospy.sleep(0.02)
 
         obs = self._get_observation()
         reward = float(self._compute_reward(obs)) 
         terminated = bool(self._is_done(obs))
         truncated = False  
         info = {}
+
+        if terminated:
+            reward += 5.0
 
         return obs, reward, terminated, truncated, info
 
