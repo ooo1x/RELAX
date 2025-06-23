@@ -418,7 +418,6 @@ int main(int argc, char** argv)
     
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
-  ros::Publisher eePosePub = nh.advertise<geometry_msgs::PoseStamped>("ee_pose", 10);
   ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
 
   ros::WallDuration(1.0).sleep();
@@ -437,7 +436,7 @@ int main(int argc, char** argv)
   group_arm.setMaxAccelerationScalingFactor(0.1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 20 ;i = i + 1)
+  for (int i = 1; i < 100 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -522,10 +521,6 @@ int main(int argc, char** argv)
       // Set the target pose for the arm group
       group_arm.setPoseTarget(targetPose);
       group_arm.move();
-
-      // Publish the current pose of the end-effector
-      currentPose = group_arm.getCurrentPose();
-      eePosePub.publish(currentPose);
 
       ros::WallDuration(0.5).sleep();
     }

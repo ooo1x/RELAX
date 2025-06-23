@@ -47,10 +47,10 @@ env = FrankaRLEnv()
 check_env(env, warn=True)
 MAX_CPP_EPISODES = 100 
 
-model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_franka_tensorboard/")
+#model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_franka_tensorboard/")
 
 checkpoint_callback = CheckpointCallback(
-    save_freq=1,
+    save_freq=10000,
     save_path="./ppo_checkpoints/",
     name_prefix="ppo_franka"
 )
@@ -61,7 +61,14 @@ callbacks = CallbackList([
     checkpoint_callback
 ])
 
-model.learn(total_timesteps=100000, callback=callbacks)
+model = PPO.load("ppo_franka_model", env=env, tensorboard_log="./ppo_franka_tensorboard/")
+model.learn(total_timesteps=1000000, callback=callbacks, reset_num_timesteps=False )
 model.save("ppo_franka_model")
 
 env.close()
+
+#   update:
+    # 1, publish EE location position, write a rostopic
+    # 2, calculate realtime distance
+    # 3, 3 balls, scenarios design, radius
+    # 4, rewrite RL

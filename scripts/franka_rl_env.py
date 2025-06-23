@@ -4,6 +4,9 @@ from moveit_commander import MoveGroupCommander, RobotCommander, roscpp_initiali
 from geometry_msgs.msg import Pose, PoseStamped
 from std_msgs.msg import Float32MultiArray, Int32
 from gymnasium import Env,spaces
+import math
+import tf2_ros
+from sensor_msgs.msg import JointState
 
 class FrankaRLEnv(Env):
     def __init__(self):
@@ -19,24 +22,28 @@ class FrankaRLEnv(Env):
         self.arm.set_max_acceleration_scaling_factor(0.1)
 
         # Set 2 goals
-        self.goal1 = np.array([0.6, -0.2, 1.42])
-        self.goal2 = np.array([0.6,  0.2, 1.42])
+        self.goal1 = np.array([0.6, -0.5, 1.5])
+        self.goal2 = np.array([0.6,  0.5, 1.42])
+        self.goal3 = np.array([0.6, 0.0, 1.7])
 
         # Set state space: ee_x, ee_y, ee_z, dx1, dy1, dz1, dx2, dy2, dz2, fault_flag
-        obs_high = np.array([2.0] * 10, dtype=np.float32)
+        obs_high = np.array([2.0] * 7, dtype=np.float32)
         self.observation_space = spaces.Box(low=-obs_high, high=obs_high, dtype=np.float32)
 
         # Set action space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.MAX_DELTA = 0.05
 
-        self.ee_position = np.zeros(3, dtype=np.float32)
+        # Initialize end-effector position
+        self.end_effector_position = np.zeros(3, dtype=np.float32)
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
+        self.joint_state_sub=rospy.Subscriber('/joint_states', JointState, self.joint_state_callback)
 
         self.fault_flag = 0  
 
         # ROS communication
         self.action_pub = rospy.Publisher("/rl_action",Float32MultiArray, queue_size=1)
-        rospy.Subscriber("/ee_pose", PoseStamped, self.ee_callback)
         rospy.Subscriber("/fault_flag", Int32, self.fault_callback)
 
         self.current_state = 0  # Initial state(in RELAX DEMO)
@@ -46,38 +53,54 @@ class FrankaRLEnv(Env):
         self.reset()
         rospy.loginfo("FrankaRLEnv initialized")
 
-    def ee_callback(self,msg):
-        self.ee_position = np.array((msg.pose.position.x,
-                                    msg.pose.position.y,
-                                    msg.pose.position.z), dtype=np.float32)
-    
     def fault_callback(self, msg):
         self.fault_flag = msg.data
 
     def state_callback(self, msg):
         self.current_state = msg.data
 
+    def joint_state_callback(self,joint_state_msg):
+        trans = self.tfBuffer.lookup_transform('world', 'panda_hand_tcp', rospy.Time(0))
+        panda_pose = PoseStamped()
+        panda_pose.header.frame_id = 'world'
+        panda_pose.header.stamp = rospy.Time.now()
+        panda_pose.pose.position.x = trans.transform.translation.x
+        panda_pose.pose.position.y = trans.transform.translation.y
+        panda_pose.pose.position.z = trans.transform.translation.z
+
+        self.end_effector_position = (panda_pose.pose.position.x, panda_pose.pose.position.y, panda_pose.pose.position.z)
+
+    def calculate_distance(self,point1, point2):
+        distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2 + (point1[2] - point2[2])**2)
+        return distance
+    
     def _get_observation(self):
-        ee_position = self.ee_position
-        delta1 = self.goal1 - ee_position
-        delta2 = self.goal2 - ee_position
-        return np.concatenate((ee_position, delta1, delta2, [self.fault_flag]), dtype=np.float32)
+        ee_position = self.end_effector_position
+        d1 = self.calculate_distance(self.goal1, ee_position)
+        d2 = self.calculate_distance(self.goal2, ee_position)
+        d3 = self.calculate_distance(self.goal3, ee_position)
+        return np.concatenate((ee_position, [d1, d2, d3, self.fault_flag]), dtype=np.float32)
+
 
     def _compute_reward(self, obs):
-        distance_to_goal1 = np.linalg.norm(obs[3:6])
-        distance_to_goal2 = np.linalg.norm(obs[6:9])
-        reward = min(distance_to_goal1, distance_to_goal2)
-        if distance_to_goal1 < 0.02 or distance_to_goal2 < 0.02:
-            reward -= 5.0  
+        d1 = obs[3]
+        d2 = obs[4]
+        d3 = obs[5]
+        danger_threshold = 0.5
+        reward = 0.1
+        min_dist = min(d1, d2, d3)
+        if min_dist < danger_threshold:
+            reward -= (danger_threshold - min_dist) * 2.0
         if self.fault_flag > 0:
-            reward -= 1.0
+            reward -= 0.5
         return reward
 
     def _is_done(self, obs):
-        distance_to_goal1 = np.linalg.norm(obs[3:6])
-        distance_to_goal2 = np.linalg.norm(obs[6:9])
-        return distance_to_goal1 < 0.01 or distance_to_goal2 < 0.01
-
+        d1 = obs[3]
+        d2 = obs[4]
+        d3 = obs[5]
+        collision_threshold = 0.2
+        return d1 < collision_threshold or d2 < collision_threshold or d3 < collision_threshold
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -105,7 +128,8 @@ class FrankaRLEnv(Env):
         info = {}
 
         if terminated:
-            reward += 5.0
+            rospy.loginfo("Collision detected! Episode terminated.")
+            reward -= 2.0
 
         return obs, reward, terminated, truncated, info
 
