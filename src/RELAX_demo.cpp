@@ -407,14 +407,20 @@ int main(int argc, char** argv)
 
   ros::Subscriber faultFlagSub =nh.subscribe("/fault_flag", 10, faultFlagCallback);
   ros::Subscriber rlActionSub = nh.subscribe("/rl_action", 1, rlActionCallback);
-  
+  ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
+
+  ROS_INFO("Publishing start signal...");
+  std_msgs::Bool start_msg;
+  start_msg.data = true;
+  start_signal_pub.publish(start_msg);
+
   ROS_INFO("Waiting for first RL action on /rl_action …");
   while (ros::ok() && !GotFirstAction)
   {
     ros::spinOnce();
     ros::Duration(0.05).sleep(); 
   }
-    ROS_INFO("First RL action received (or timeout), starting main loop…");
+    ROS_INFO("First RL action received, starting main loop…");
     
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
@@ -436,7 +442,7 @@ int main(int argc, char** argv)
   group_arm.setMaxAccelerationScalingFactor(0.1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 100 ;i = i + 1)
+  for (int i = 1; i < 200 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement

@@ -3,11 +3,73 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from franka_rl_env import FrankaRLEnv
 import rospy
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32MultiArray, Bool
 import os
+import numpy as np
+import tf2_ros
+from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Pose, PoseStamped
+import time
+from stable_baselines3.common.logger import configure
+from rosgraph_msgs.msg import Log
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  
-checkpoint_dir = os.path.join(BASE_DIR, "ppo_checkpoints")
+
+run_id = time.strftime("%Y%m%d-%H%M%S")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+experement_dir = os.path.join(BASE_DIR, "experiments")
+checkpoint_dir = os.path.join(experement_dir, "ppo_checkpoints", run_id)
+model_save_path = os.path.join(experement_dir, "ppo_franka_model", run_id + ".zip")
+tensorboard_log_dir = os.path.join(experement_dir, "ppo_franka_tensorboard",run_id)
+evaluation_dir = os.path.join(experement_dir, "ppo_franka_evaluation", run_id)
+
+
+current_state = 0
+fault_flag = 0
+end_effector_position = np.zeros(3, dtype=np.float32)
+start_signal_received = False
+round_end_flag = False
+current_cpp_episode = 0
+
+def cpp_episode_callback(msg):
+    global current_cpp_episode
+    current_cpp_episode = msg.data
+
+def start_signal_callback(msg):
+    global start_signal_received
+    if msg.data:
+        rospy.loginfo("[TRAIN] Start signal received")
+        dummy_action = Float32MultiArray(data=[0.0, 0.0, 0.0])
+        rospy.loginfo("[TRAIN] Sending dummy action to unblock C++...")
+        action_pub.publish(dummy_action)
+        start_signal_received = True
+
+def pose_state_callback(msg):
+    global current_state, round_end_flag
+    current_state = msg.data
+    if msg.data == 404:
+        round_end_flag = True
+    else:
+        round_end_flag = False
+
+def fault_flag_callback(msg):
+    global fault_flag
+    fault_flag = msg.data
+
+def joint_state_callback(msg):
+    global end_effector_position
+    try:
+        trans = tfBuffer.lookup_transform('world', 'panda_hand_tcp', rospy.Time(0))
+        panda_pose = PoseStamped()
+        panda_pose.header.frame_id = 'world'
+        panda_pose.header.stamp = rospy.Time.now()
+        panda_pose.pose.position.x = trans.transform.translation.x
+        panda_pose.pose.position.y = trans.transform.translation.y
+        panda_pose.pose.position.z = trans.transform.translation.z
+
+        end_effector_position = (panda_pose.pose.position.x, panda_pose.pose.position.y, panda_pose.pose.position.z)
+
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+        rospy.logwarn("Transform lookup failed!")
 
 class RosLogCallback(BaseCallback):
     def __init__(self):
@@ -23,52 +85,96 @@ class RosLogCallback(BaseCallback):
 
         return True
 
-
 class StopWhenCppDone(BaseCallback):
-    def __init__(self, max_cpp_episodes=100, verbose=0):
+    def __init__(self, get_cpp_episode, max_cpp_episodes, verbose=0):
         super().__init__(verbose)
+        self.get_cpp_episode = get_cpp_episode
         self.max_cpp_episodes = max_cpp_episodes
-        self.current_cpp_episode = 0
-
-        if not rospy.core.is_initialized():
-            rospy.init_node("rl_callback_listener", anonymous=True)
-
-        rospy.Subscriber("/episode", Int32, self.episode_callback)
-
-    def episode_callback(self, msg):
-        self.current_cpp_episode = msg.data
-        if self.verbose:
-            rospy.loginfo(f"Received C++ episode: {self.current_cpp_episode}")
+        self.verbose = verbose
 
     def _on_step(self) -> bool:
-        return self.current_cpp_episode < self.max_cpp_episodes
+        rospy.sleep(0.001)
+        current_episode = self.get_cpp_episode()
+        return current_episode < self.max_cpp_episodes
 
-env = FrankaRLEnv()
-check_env(env, warn=True)
-MAX_CPP_EPISODES = 100 
 
-#model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_franka_tensorboard/")
+if __name__ == "__main__":
 
-checkpoint_callback = CheckpointCallback(
-    save_freq=10000,
-    save_path="./ppo_checkpoints/",
-    name_prefix="ppo_franka"
-)
+    rospy.init_node('ppo_trainer', anonymous=True)
+    tfBuffer = tf2_ros.Buffer()
+    listener = tf2_ros.TransformListener(tfBuffer)
 
-callbacks = CallbackList([
-    RosLogCallback(),
-    StopWhenCppDone(MAX_CPP_EPISODES, verbose=1),
-    checkpoint_callback
-])
+    # Publishers
+    action_pub = rospy.Publisher("/rl_action", Float32MultiArray, queue_size=10, latch=True)
 
-model = PPO.load("ppo_franka_model", env=env, tensorboard_log="./ppo_franka_tensorboard/")
-model.learn(total_timesteps=1000000, callback=callbacks, reset_num_timesteps=False )
-model.save("ppo_franka_model")
+    # Subscribers
+    rospy.Subscriber("/start_signal", Bool, start_signal_callback)
+    rospy.Subscriber("/pose_state", Int32, pose_state_callback)
+    rospy.Subscriber("/fault_flag", Int32, fault_flag_callback)
+    rospy.Subscriber("/joint_states", JointState, joint_state_callback)
+    rospy.Subscriber("/episode", Int32, cpp_episode_callback)
 
-env.close()
+    rate = rospy.Rate(50)
+    rospy.loginfo("[TRAIN] Waiting for start signal from C++...")
 
-#   update:
-    # 1, publish EE location position, write a rostopic
-    # 2, calculate realtime distance
-    # 3, 3 balls, scenarios design, radius
-    # 4, rewrite RL
+    while not start_signal_received and not rospy.is_shutdown():
+        rate.sleep()
+
+    rospy.loginfo("[TRAIN] Start signal received, proceeding...")
+    
+    env = FrankaRLEnv( get_current_state=lambda: current_state,
+        get_fault_flag=lambda: fault_flag,
+        get_ee_position=lambda: end_effector_position,
+        get_round_end=lambda: round_end_flag)
+
+
+    check_env(env, warn=True)
+    MAX_CPP_EPISODES = 149
+
+    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=tensorboard_log_dir)
+
+    checkpoint_callback = CheckpointCallback(
+        save_freq=1000,
+        save_path=checkpoint_dir,
+        name_prefix="ppo_franka"
+    )
+
+    callbacks = CallbackList([
+        RosLogCallback(),
+        StopWhenCppDone(get_cpp_episode=lambda: current_cpp_episode, max_cpp_episodes=MAX_CPP_EPISODES, verbose=1),
+        checkpoint_callback
+    ])
+
+    #model = PPO.load("ppo_franka_model", env=env, tensorboard_log="./ppo_franka_tensorboard/")
+    model.learn(total_timesteps=100000000, callback=callbacks, reset_num_timesteps=False )
+    rospy.loginfo("[TRAIN] PPO training finished, saving model...")
+    model.save(model_save_path)
+    rospy.loginfo("[TRAIN] Model saved, exiting.")
+
+
+    # ==== Offline Evaluation ====
+    num_eval_episodes = 50
+    rospy.loginfo(f"Starting offline evaluation over {num_eval_episodes} episodes...")
+
+    eval_logger = configure(evaluation_dir, ["tensorboard", "stdout"])
+
+    for eval_ep in range(num_eval_episodes):
+        obs, _ = env.reset()
+        done = False
+        total_reward = 0
+        steps = 0
+
+        while not done and not rospy.is_shutdown():
+            action, _ = model.predict(obs, deterministic=True)   
+            obs, reward, terminated, truncated, info = env.step(action)
+            total_reward += reward
+            done = terminated or truncated
+            steps += 1
+
+        rospy.loginfo(f"[EVAL] Episode {eval_ep+1}: Total reward={total_reward:.2f}, Steps={steps}")
+    
+        eval_logger.record("eval/episode_reward", total_reward)
+        eval_logger.record("eval/episode_length", steps)
+        eval_logger.dump(eval_ep)
+
+    env.close()

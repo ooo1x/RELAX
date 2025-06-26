@@ -1,18 +1,16 @@
 import rospy
 import numpy as np
 from moveit_commander import MoveGroupCommander, RobotCommander, roscpp_initialize, roscpp_shutdown
-from geometry_msgs.msg import Pose, PoseStamped
-from std_msgs.msg import Float32MultiArray, Int32
+from std_msgs.msg import Float32MultiArray, Int32, Bool
 from gymnasium import Env,spaces
 import math
-import tf2_ros
-from sensor_msgs.msg import JointState
+from rosgraph_msgs.msg import Log
+
 
 class FrankaRLEnv(Env):
-    def __init__(self):
+    def __init__(self, get_current_state, get_fault_flag, get_ee_position, get_round_end):
         super(FrankaRLEnv, self).__init__()
         roscpp_initialize([])
-        rospy.init_node('franka_rl_env', anonymous=True)
         rospy.loginfo("Initializing FrankaRLEnv...")
 
         # Initialize MoveIt
@@ -34,102 +32,118 @@ class FrankaRLEnv(Env):
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.MAX_DELTA = 0.05
 
-        # Initialize end-effector position
-        self.end_effector_position = np.zeros(3, dtype=np.float32)
-        self.tfBuffer = tf2_ros.Buffer()
-        self.listener = tf2_ros.TransformListener(self.tfBuffer)
-        self.joint_state_sub=rospy.Subscriber('/joint_states', JointState, self.joint_state_callback)
-
-        self.fault_flag = 0  
+        # Initialize variables
+        self.get_current_state = get_current_state
+        self.get_fault_flag = get_fault_flag
+        self.get_ee_position = get_ee_position
+        self.get_round_end = get_round_end
+        self.planning_failed_flag = False
 
         # ROS communication
         self.action_pub = rospy.Publisher("/rl_action",Float32MultiArray, queue_size=1)
-        rospy.Subscriber("/fault_flag", Int32, self.fault_callback)
+        rospy.Subscriber("/rosout", Log, self._rosout_callback)
 
-        self.current_state = 0  # Initial state(in RELAX DEMO)
-        rospy.Subscriber("/pose_state", Int32, self.state_callback)
-        self.dummy_sent = False
+        self.MAX_EPISODE_STEPS = 500
+        self.current_episode_steps = 0
 
-        self.reset()
-        rospy.loginfo("FrankaRLEnv initialized")
+        rospy.loginfo("FrankaRLEnv initialized successfully.")
 
-    def fault_callback(self, msg):
-        self.fault_flag = msg.data
-
-    def state_callback(self, msg):
-        self.current_state = msg.data
-
-    def joint_state_callback(self,joint_state_msg):
-        trans = self.tfBuffer.lookup_transform('world', 'panda_hand_tcp', rospy.Time(0))
-        panda_pose = PoseStamped()
-        panda_pose.header.frame_id = 'world'
-        panda_pose.header.stamp = rospy.Time.now()
-        panda_pose.pose.position.x = trans.transform.translation.x
-        panda_pose.pose.position.y = trans.transform.translation.y
-        panda_pose.pose.position.z = trans.transform.translation.z
-
-        self.end_effector_position = (panda_pose.pose.position.x, panda_pose.pose.position.y, panda_pose.pose.position.z)
+    def _rosout_callback(self, msg):
+        if msg.name == "/move_group":
+            error_keywords = [
+                "No motion plan found",
+                "controller failed",
+                "ABORTED"
+            ]
+            if any(keyword in msg.msg for keyword in error_keywords):
+                rospy.logwarn(f"[RL ENV] MoveIt failed: {msg.msg}")
+                self.planning_failed_flag = True 
 
     def calculate_distance(self,point1, point2):
         distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2 + (point1[2] - point2[2])**2)
         return distance
     
     def _get_observation(self):
-        ee_position = self.end_effector_position
+        ee_position = np.array(self.get_ee_position(), dtype=np.float32)
         d1 = self.calculate_distance(self.goal1, ee_position)
         d2 = self.calculate_distance(self.goal2, ee_position)
         d3 = self.calculate_distance(self.goal3, ee_position)
-        return np.concatenate((ee_position, [d1, d2, d3, self.fault_flag]), dtype=np.float32)
+        fault = self.get_fault_flag()
+        return np.concatenate((ee_position, [d1, d2, d3, fault]), dtype=np.float32)
 
 
-    def _compute_reward(self, obs):
-        d1 = obs[3]
-        d2 = obs[4]
-        d3 = obs[5]
-        danger_threshold = 0.5
-        reward = 0.1
+    def _compute_reward(self, obs, step_count=0):
+        d1, d2, d3 = obs[3], obs[4], obs[5]
         min_dist = min(d1, d2, d3)
-        if min_dist < danger_threshold:
-            reward -= (danger_threshold - min_dist) * 2.0
-        if self.fault_flag > 0:
-            reward -= 0.5
-        return reward
 
-    def _is_done(self, obs):
+        safe_range = 0.2 
+        reward = 0.0
+
+        if min_dist >= safe_range:
+            reward = 2.0 * min(min_dist, 0.5) / 0.5
+        else:
+            reward = -3.0 * (1 - (min_dist / safe_range))
+            reward = max(reward, -3.0)
+
+        if self._is_terminated_by_collision(obs):
+            reward -= 5.0
+            rospy.loginfo("[STEP] Collision detected! Terminating episode.")
+
+        if step_count >= self.MAX_EPISODE_STEPS:
+            reward -= 1.0
+            rospy.loginfo(f"[STEP] Max steps reached ({self.MAX_EPISODE_STEPS}), truncating.")
+
+        print(f"[REWARD] step: {step_count}, min_dist: {min_dist:.3f}, reward: {reward:.2f}")
+        return reward
+    
+    def _is_terminated_by_collision(self, obs):
         d1 = obs[3]
         d2 = obs[4]
         d3 = obs[5]
         collision_threshold = 0.2
-        return d1 < collision_threshold or d2 < collision_threshold or d3 < collision_threshold
+        return bool(d1 < collision_threshold or d2 < collision_threshold or d3 < collision_threshold)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         rospy.loginfo("Resetting FrankaRLEnv...")
         rospy.sleep(0.5)
+        self.current_episode_steps = 0
+        self.planning_failed_flag = False
         obs = self._get_observation()
         return obs, {}  
     
     def step(self, action):
-        if self.current_state in (3, 4, 5, 6):
+        wait_time = 0.0
+        wait_dt = 0.01
+        max_wait = 5.0  
+
+        while self.get_current_state() not in (3, 4, 5, 6) and wait_time < max_wait:
+            rospy.sleep(wait_dt)
+            wait_time += wait_dt
+
+        if self.get_current_state() not in (3, 4, 5, 6):
+            rospy.logwarn(f"[RL ENV] Timeout waiting for state 3~6, current state: {self.get_current_state()}")
+
+        self.current_episode_steps += 1
+
+        if self.get_current_state() in (3, 4, 5, 6):
             delta = np.clip(action, -1.0, 1.0) * self.MAX_DELTA
             msg = Float32MultiArray(data=delta.astype(np.float32).tolist())
             self.action_pub.publish(msg)
-        else:
-            if not self.dummy_sent:
-                self.action_pub.publish(Float32MultiArray(data=[0.0, 0.0, 0.0]))
-                self.dummy_sent = True
-
+        
         rospy.sleep(0.02)
 
         obs = self._get_observation()
-        reward = float(self._compute_reward(obs)) 
-        terminated = bool(self._is_done(obs))
-        truncated = False  
+        reward = float(self._compute_reward(obs, self.current_episode_steps))
+        
+        if self.planning_failed_flag: 
+            reward -= 5.0
+            rospy.loginfo("[STEP] MoveIt planning failed! Applying penalty.")
+            self.planning_failed_flag = False 
+ 
+        terminated = self._is_terminated_by_collision(obs)
+        truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
         info = {}
-
-        if terminated:
-            rospy.loginfo("Collision detected! Episode terminated.")
-            reward -= 2.0
 
         return obs, reward, terminated, truncated, info
 
