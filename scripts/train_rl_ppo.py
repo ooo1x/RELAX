@@ -18,16 +18,16 @@ run_id = time.strftime("%Y%m%d-%H%M%S")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 experement_dir = os.path.join(BASE_DIR, "experiments")
 checkpoint_dir = os.path.join(experement_dir, "ppo_checkpoints", run_id)
-model_save_path = os.path.join(experement_dir, "ppo_franka_model", run_id + ".zip")
-tensorboard_log_dir = os.path.join(experement_dir, "ppo_franka_tensorboard",run_id)
-evaluation_dir = os.path.join(experement_dir, "ppo_franka_evaluation", run_id)
+model_save_path = os.path.join(experement_dir, "ppo_franka_model", "ppo_franka_model.zip")
+tensorboard_log_dir = os.path.join(experement_dir, "ppo_franka_tensorboard")
+evaluation_dir = os.path.join(experement_dir, "ppo_franka_evaluation")
 
 
-current_state = 0
-fault_flag = 0
+# current_state = 0
+# fault_flag = 0
 end_effector_position = np.zeros(3, dtype=np.float32)
-start_signal_received = False
-round_end_flag = False
+# start_signal_received = False
+# round_end_flag = False
 current_cpp_episode = 0
 
 def cpp_episode_callback(msg):
@@ -108,33 +108,30 @@ if __name__ == "__main__":
     action_pub = rospy.Publisher("/rl_action", Float32MultiArray, queue_size=10, latch=True)
 
     # Subscribers
-    rospy.Subscriber("/start_signal", Bool, start_signal_callback)
-    rospy.Subscriber("/pose_state", Int32, pose_state_callback)
-    rospy.Subscriber("/fault_flag", Int32, fault_flag_callback)
+    #rospy.Subscriber("/start_signal", Bool, start_signal_callback)
+    #rospy.Subscriber("/pose_state", Int32, pose_state_callback)
+    #rospy.Subscriber("/fault_flag", Int32, fault_flag_callback)
     rospy.Subscriber("/joint_states", JointState, joint_state_callback)
     rospy.Subscriber("/episode", Int32, cpp_episode_callback)
 
-    rate = rospy.Rate(50)
-    rospy.loginfo("[TRAIN] Waiting for start signal from C++...")
-
-    while not start_signal_received and not rospy.is_shutdown():
-        rate.sleep()
-
-    rospy.loginfo("[TRAIN] Start signal received, proceeding...")
+    rospy.loginfo("[TRAIN] Waiting for TF transforms to be available...")
+    rospy.sleep(2.0) 
+    rospy.loginfo("[TRAIN] Initializing FrankaRLEnv...")
     
-    env = FrankaRLEnv( get_current_state=lambda: current_state,
-        get_fault_flag=lambda: fault_flag,
-        get_ee_position=lambda: end_effector_position,
-        get_round_end=lambda: round_end_flag)
+    env = FrankaRLEnv(get_ee_position=lambda: end_effector_position,
+       )
 
 
-    check_env(env, warn=True)
-    MAX_CPP_EPISODES = 149
+    # check_env(env, warn=True)
+    MAX_CPP_EPISODES = 199
 
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=tensorboard_log_dir)
+    if os.path.exists(model_save_path):
+        model = PPO.load(model_save_path, env=env, tensorboard_log=tensorboard_log_dir)
+    else:
+        model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=tensorboard_log_dir)
 
     checkpoint_callback = CheckpointCallback(
-        save_freq=1000,
+        save_freq=5000,
         save_path=checkpoint_dir,
         name_prefix="ppo_franka"
     )
@@ -145,36 +142,7 @@ if __name__ == "__main__":
         checkpoint_callback
     ])
 
-    #model = PPO.load("ppo_franka_model", env=env, tensorboard_log="./ppo_franka_tensorboard/")
-    model.learn(total_timesteps=100000000, callback=callbacks, reset_num_timesteps=False )
+    model.learn(total_timesteps=100000000, callback=callbacks, reset_num_timesteps=False)
     rospy.loginfo("[TRAIN] PPO training finished, saving model...")
     model.save(model_save_path)
     rospy.loginfo("[TRAIN] Model saved, exiting.")
-
-
-    # ==== Offline Evaluation ====
-    num_eval_episodes = 50
-    rospy.loginfo(f"Starting offline evaluation over {num_eval_episodes} episodes...")
-
-    eval_logger = configure(evaluation_dir, ["tensorboard", "stdout"])
-
-    for eval_ep in range(num_eval_episodes):
-        obs, _ = env.reset()
-        done = False
-        total_reward = 0
-        steps = 0
-
-        while not done and not rospy.is_shutdown():
-            action, _ = model.predict(obs, deterministic=True)   
-            obs, reward, terminated, truncated, info = env.step(action)
-            total_reward += reward
-            done = terminated or truncated
-            steps += 1
-
-        rospy.loginfo(f"[EVAL] Episode {eval_ep+1}: Total reward={total_reward:.2f}, Steps={steps}")
-    
-        eval_logger.record("eval/episode_reward", total_reward)
-        eval_logger.record("eval/episode_length", steps)
-        eval_logger.dump(eval_ep)
-
-    env.close()

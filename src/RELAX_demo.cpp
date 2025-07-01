@@ -29,21 +29,30 @@ double RLAction[3] = {0.0, 0.0, 0.0};
 int FaultFlag = 0;
 bool   GotFirstAction = false; 
 
+ros::Publisher g_rl_request_pub;      
+geometry_msgs::Pose g_resolved_rl_pose; 
+bool g_rl_pose_received = false;       
 
-//Functions for Moving and grasping with robot
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-//Position, Orientation, Planning, Exectuion initPose
 
 void rlActionCallback(const std_msgs::Float32MultiArrayConstPtr& msg)
 {
-  if (msg->data.size() >= 3) {
+  if (!GotFirstAction && msg->data.size() >= 3)
+  {
     RLAction[0] = msg->data[0];
     RLAction[1] = msg->data[1];
     RLAction[2] = msg->data[2];
     GotFirstAction = true;
-}            
+  }
 }
+//Functions for Moving and grasping with robot
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Position, Orientation, Planning, Exectuion initPose
 
+void resolvedPoseCallback(const geometry_msgs::PoseConstPtr& msg)
+{
+  g_resolved_rl_pose = *msg;
+  g_rl_pose_received = true;
+}
 
 void faultFlagCallback(const std_msgs::Int32::ConstPtr& msg)
 {
@@ -395,6 +404,31 @@ void addCollisionObjects(moveit::planning_interface::PlanningSceneInterface& pla
   planning_scene_interface.applyCollisionObjects(collision_objects);
 }
 
+void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, const geometry_msgs::Pose& target_pose)
+{
+  g_rl_pose_received = false;
+
+  g_rl_request_pub.publish(target_pose);
+  ROS_INFO("Published RL action request with target pose. Waiting for response...");
+
+  ros::Rate r(100);
+  while(ros::ok() && !g_rl_pose_received)
+  {
+    r.sleep();
+  }
+
+  if (g_rl_pose_received)
+  {
+    move_group.setPoseTarget(g_resolved_rl_pose);
+    move_group.move();
+    ROS_INFO("Move execution with RL-resolved pose complete.");
+  }
+  else
+  {
+    ROS_ERROR("Failed to receive RL pose in time or ROS is shutting down.");
+  }
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv)
 {
@@ -406,21 +440,16 @@ int main(int argc, char** argv)
   spinner.start();
 
   ros::Subscriber faultFlagSub =nh.subscribe("/fault_flag", 10, faultFlagCallback);
-  ros::Subscriber rlActionSub = nh.subscribe("/rl_action", 1, rlActionCallback);
   ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
+  ros::Subscriber rlResolvedSub = nh.subscribe("/rl/action_resolved", 1, resolvedPoseCallback);
+  g_rl_request_pub = nh.advertise<geometry_msgs::Pose>("/rl/action_request", 1, true);
+
 
   ROS_INFO("Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
   start_signal_pub.publish(start_msg);
 
-  ROS_INFO("Waiting for first RL action on /rl_action …");
-  while (ros::ok() && !GotFirstAction)
-  {
-    ros::spinOnce();
-    ros::Duration(0.05).sleep(); 
-  }
-    ROS_INFO("First RL action received, starting main loop…");
     
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
@@ -483,15 +512,23 @@ int main(int argc, char** argv)
     hoverPose(group_arm);
     ROS_INFO("Hover Pose done");
     
-    
+    // state.data = 2;
+    // pose_state_pub.publish(state);
+    // pickPose(group_arm , "down");
+    // ROS_INFO("Pick Pose done");
+
     state.data = 2;
     pose_state_pub.publish(state);
-    pickPose(group_arm , "down");
-    ROS_INFO("Pick Pose done");
+    {
+      geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+      original_target.position.z -= 0.26; 
+      performRLStep(group_arm, original_target);
+      ROS_INFO("Step 2: RL-guided Pick Pose (down) done");
+    }
     
-    // state.data = 3;
-    // pose_state_pub.publish(state);
-    // pick(group_arm);
+    state.data = 3;
+    pose_state_pub.publish(state);
+    pick(group_arm);
     
     // state.data = 4;
     // pose_state_pub.publish(state);
@@ -501,35 +538,32 @@ int main(int argc, char** argv)
     // pose_state_pub.publish(state);
     // hoverPlacePose(group_arm);
 
-    // state.data = 6;
-    // pose_state_pub.publish(state);
-    // PlacePose(group_arm , "down");
-
-    for (int s = 3; s <= 6; ++s)
-    {
-      
-      ROS_INFO("State: %d", s);
-      std_msgs::Int32 stateMsg;
-      stateMsg.data = s;
-      pose_state_pub.publish(stateMsg);
-
-      // Get the current pose of the end-effector
-      geometry_msgs::PoseStamped currentPose = group_arm.getCurrentPose();
-      geometry_msgs::Pose        targetPose  = currentPose.pose;
-
-      // Add the RL action to the target pose
-      targetPose.position.x += RLAction[0];
-      targetPose.position.y += RLAction[1];
-      targetPose.position.z += RLAction[2];
-      ROS_INFO("x=%.4f, y=%.4f, z=%.4f", RLAction[0], RLAction[1], RLAction[2]);
-
-
-      // Set the target pose for the arm group
-      group_arm.setPoseTarget(targetPose);
-      group_arm.move();
-
-      ros::WallDuration(0.5).sleep();
+    state.data = 4;
+    pose_state_pub.publish(state);
+   {
+    geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+    original_target.position.z += 0.26; 
+    performRLStep(group_arm, original_target);
+    ROS_INFO("Step 4: RL-guided Lift up done");
     }
+
+    state.data = 5;
+    pose_state_pub.publish(state);
+    {
+      geometry_msgs::Pose original_target;
+      tf2::Quaternion orientation;
+      orientation.setRPY(-tau/2, 0, -tau/8);
+      original_target.orientation = tf2::toMsg(orientation);
+      original_target.position.x = 0.502; 
+      original_target.position.y = 0.2;
+      original_target.position.z = 1.5;
+      performRLStep(group_arm, original_target);
+      ROS_INFO("Step 5: RL-guided Hover Place Pose done");
+  }
+
+    state.data = 6;
+    pose_state_pub.publish(state);
+    PlacePose(group_arm , "down");
 
     state.data = 7;
     pose_state_pub.publish(state);
