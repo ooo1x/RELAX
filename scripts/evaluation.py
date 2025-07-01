@@ -18,11 +18,12 @@ from stable_baselines3.common.logger import configure
 run_id = time.strftime("%Y%m%d-%H%M%S")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 experement_dir = os.path.join(BASE_DIR, "experiments")
-checkpoint_dir = os.path.join(experement_dir, "ppo_checkpoints", run_id)
-tensorboard_log_dir = os.path.join(experement_dir, "ppo_franka_tensorboard",run_id)
-evaluation_dir = os.path.join(experement_dir, "ppo_franka_evaluation", run_id)
+ppo_dir = os.path.join(experement_dir, "ppo")
+checkpoint_dir = os.path.join(ppo_dir, "ppo_checkpoints", run_id)
+tensorboard_log_dir = os.path.join(ppo_dir, "ppo_franka_tensorboard")
+evaluation_dir = os.path.join(ppo_dir, "ppo_franka_evaluation")
 
-model_save_path = os.path.join(experement_dir, "ppo_franka_model", run_id + ".zip")
+model_save_path = os.path.join(ppo_dir, "ppo_franka_model", "ppo_franka_model.zip")
 
 
 end_effector_position = np.zeros(3, dtype=np.float32)
