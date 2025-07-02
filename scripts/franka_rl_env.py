@@ -33,7 +33,7 @@ class FrankaRLEnv(Env):
 
         # Set action space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
-        self.MAX_DELTA = 0.05
+        self.MAX_DELTA = 0.5
 
         # Initialize variables
         #self.get_current_state = get_current_state
@@ -88,8 +88,15 @@ class FrankaRLEnv(Env):
 
 
     def _compute_reward(self):
-        final_ee_pos = np.array(self.get_ee_position())
+        WEIGHT_TARGET = 1.0     
+        WEIGHT_OBSTACLE = 1.5 
+        WEIGHT_SUCCESS = 100.0   
+        WEIGHT_FAILURE = -100.0  
         
+        COLLISION_THRESHOLD = 0.2 
+        TARGET_THRESHOLD = 0.05    
+
+        final_ee_pos = np.array(self.get_ee_position())
         target_pos = np.array([
             self.current_request.position.x,
             self.current_request.position.y,
@@ -97,28 +104,24 @@ class FrankaRLEnv(Env):
         ])
 
         distance_to_target = np.linalg.norm(final_ee_pos - target_pos)
-        reward_target = math.exp(-10 * distance_to_target)  
+        reward_target = -WEIGHT_TARGET * distance_to_target
 
         min_dist_to_obstacle = min(np.linalg.norm(final_ee_pos - obs) for obs in self.obstacles)
-        
-        penalty_obstacle = 0.0
-        SAFETY_MARGIN = 0.25
-        COLLISION_THRESHOLD = 0.2
 
+        penalty_obstacle = 0.0
         if min_dist_to_obstacle < COLLISION_THRESHOLD:
-            penalty_obstacle = -1.0
-        elif min_dist_to_obstacle < SAFETY_MARGIN:
-            penalty_obstacle = -1.0 * ((SAFETY_MARGIN - min_dist_to_obstacle) / SAFETY_MARGIN)**2
-            penalty_obstacle = max(penalty_obstacle, -1.0)
+            penalty_obstacle = WEIGHT_FAILURE
+        elif min_dist_to_obstacle < (COLLISION_THRESHOLD + 0.2):
+            penalty_obstacle = -WEIGHT_OBSTACLE / (min_dist_to_obstacle + 1e-9)
 
         success_bonus = 0.0
-        TARGET_THRESHOLD = 0.05
         if distance_to_target < TARGET_THRESHOLD:
-            success_bonus = 1.0
+            success_bonus = WEIGHT_SUCCESS
 
         total_reward = reward_target + penalty_obstacle + success_bonus
 
         return total_reward
+
 
     
     def reset(self, *, seed=None, options=None):

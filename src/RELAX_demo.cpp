@@ -471,7 +471,7 @@ int main(int argc, char** argv)
   group_arm.setMaxAccelerationScalingFactor(0.1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 200 ;i = i + 1)
+  for (int i = 1; i < 500 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement

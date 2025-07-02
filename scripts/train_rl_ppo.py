@@ -128,6 +128,8 @@ if __name__ == "__main__":
 
     if os.path.exists(model_save_path):
         model = PPO.load(model_save_path, env=env, tensorboard_log=tensorboard_log_dir)
+        new_logger = configure(tensorboard_log_dir, ["stdout", "tensorboard"])
+        model.set_logger(new_logger)
     else:
         model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=tensorboard_log_dir)
 

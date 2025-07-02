@@ -94,7 +94,6 @@ if __name__ == "__main__":
         eval_logger.dump(step=eval_ep)
 
 
-    # --- 打印最终评估总结 ---
     rospy.loginfo("="*50)
     rospy.loginfo("Evaluation Summary")
     rospy.loginfo(f"Average Reward over {num_eval_episodes} episodes: {np.mean(all_rewards):.2f} +/- {np.std(all_rewards):.2f}")
