@@ -178,7 +178,7 @@ if __name__ == "__main__":
         rospy.loginfo("[TRAIN] No loadable model found or --new flag specified. Creating a new one.")
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
                      gamma=0.99, tensorboard_log=TENSORBOARD_LOG_DIR,
-                     buffer_size=200000, learning_starts=30000)
+                     buffer_size=200000, learning_starts=10000)
 
     checkpoint_callback = CheckpointCallback(
         save_freq=100000,
