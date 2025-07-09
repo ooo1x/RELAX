@@ -22,43 +22,10 @@
 // The circle constant tau = 2*pi. One tau is one rotation in radians.
 const double tau = 2 * M_PI;
 
-#include <geometry_msgs/PoseStamped.h>
-#include <std_msgs/Float32MultiArray.h>
 
-double RLAction[3] = {0.0, 0.0, 0.0};
-int FaultFlag = 0;
-bool   GotFirstAction = false; 
-
-ros::Publisher g_rl_request_pub;      
-geometry_msgs::Pose g_resolved_rl_pose; 
-bool g_rl_pose_received = false;       
-
-
-void rlActionCallback(const std_msgs::Float32MultiArrayConstPtr& msg)
-{
-  if (!GotFirstAction && msg->data.size() >= 3)
-  {
-    RLAction[0] = msg->data[0];
-    RLAction[1] = msg->data[1];
-    RLAction[2] = msg->data[2];
-    GotFirstAction = true;
-  }
-}
 //Functions for Moving and grasping with robot
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Position, Orientation, Planning, Exectuion initPose
-
-void resolvedPoseCallback(const geometry_msgs::PoseConstPtr& msg)
-{
-  g_resolved_rl_pose = *msg;
-  g_rl_pose_received = true;
-}
-
-void faultFlagCallback(const std_msgs::Int32::ConstPtr& msg)
-{
-    FaultFlag = msg->data;     
-}
-
 
 void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
 { 
@@ -310,37 +277,6 @@ void pick(moveit::planning_interface::MoveGroupInterface& move_group)
   
 }
 
-void pick2(moveit::planning_interface::MoveGroupInterface& move_group)
-{
-    std::vector<moveit_msgs::Grasp> grasps;
-    grasps.resize(1);
-
-    grasps[0].grasp_pose.header.frame_id = "panda_link0";
-    grasps[0].grasp_pose.pose.orientation.w = 1.0;
-    grasps[0].grasp_pose.pose.position.x = 0.5;
-    grasps[0].grasp_pose.pose.position.y = -0.2;
-    grasps[0].grasp_pose.pose.position.z = 0.145 / 2.0;
-
-    grasps[0].pre_grasp_posture.joint_names.resize(2, "panda_finger_joint1");
-    grasps[0].pre_grasp_posture.joint_names[1] = "panda_finger_joint2";
-    grasps[0].pre_grasp_posture.points.resize(1);
-    grasps[0].pre_grasp_posture.points[0].positions.resize(2);
-    grasps[0].pre_grasp_posture.points[0].positions[0] = 0.04; 
-    grasps[0].pre_grasp_posture.points[0].positions[1] = 0.04;
-    grasps[0].pre_grasp_posture.points[0].time_from_start = ros::Duration(0.5);
-
-    closedGripper(grasps[0].grasp_posture);
-
-    grasps[0].pre_grasp_approach.direction.header.frame_id = "panda_link0";
-    grasps[0].pre_grasp_approach.direction.vector.z = -1.0; 
-    grasps[0].pre_grasp_approach.min_distance = 0.05;       
-    grasps[0].pre_grasp_approach.desired_distance = 0.1;   
-
-    move_group.setSupportSurfaceName("table1");
-    move_group.pick("cylinder1", grasps);
-}
-
-
 ///////////////////////////////////////////////////////////////////////////////////////
 // Plan and execute open hand
 
@@ -435,30 +371,6 @@ void addCollisionObjects(moveit::planning_interface::PlanningSceneInterface& pla
   planning_scene_interface.applyCollisionObjects(collision_objects);
 }
 
-void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, const geometry_msgs::Pose& target_pose)
-{
-  g_rl_pose_received = false;
-
-  g_rl_request_pub.publish(target_pose);
-  // ROS_INFO("Published RL action request with target pose. Waiting for response...");
-
-  ros::Rate r(100);
-  while(ros::ok() && !g_rl_pose_received)
-  {
-    r.sleep();
-  }
-
-  if (g_rl_pose_received)
-  {
-    move_group.setPoseTarget(g_resolved_rl_pose);
-    move_group.move();
-    // ROS_INFO("Move execution with RL-resolved pose complete.");
-  }
-  else
-  {
-    ROS_ERROR("Failed to receive RL pose in time or ROS is shutting down.");
-  }
-}
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv)
@@ -467,25 +379,12 @@ int main(int argc, char** argv)
   ros::NodeHandle nh;
 
   //Get information about robot state
-  ros::AsyncSpinner spinner(2);
+  ros::AsyncSpinner spinner(1);
   spinner.start();
 
-  ros::Subscriber faultFlagSub =nh.subscribe("/fault_flag", 10, faultFlagCallback);
-  ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
-  ros::Subscriber rlResolvedSub = nh.subscribe("/rl/action_resolved", 1, resolvedPoseCallback);
-  g_rl_request_pub = nh.advertise<geometry_msgs::Pose>("/rl/action_request", 1, true);
-
-
-  ROS_INFO("Publishing start signal...");
-  std_msgs::Bool start_msg;
-  start_msg.data = true;
-  start_signal_pub.publish(start_msg);
-
-    
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
-  ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
-
+  
   ros::WallDuration(1.0).sleep();
   
 
@@ -502,7 +401,7 @@ int main(int argc, char** argv)
   group_arm.setMaxAccelerationScalingFactor(0.1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 500 ;i = i + 1)
+  for (int i = 1; i < 2 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -537,130 +436,131 @@ int main(int argc, char** argv)
     // Wait a bit for ROS things to initialize
     ros::WallDuration(1.0).sleep();
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //Start motion to each position grasp, release and detach
+    // ROS_WARN("round %d start at:%.8f",i,ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+
+    //First open Hand, move to init pose
+    // ROS_WARN("openhand start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    // openHand(group_hand);
+    // ROS_WARN("openhand end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+
+
+    // ROS_WARN("initpose start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    // initPose(group_arm);
+    // ROS_WARN("initpose end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+
     std_msgs::Int32 state;
     state.data = 1;
     pose_state_pub.publish(state);
+
     hoverPose(group_arm);
-    ROS_INFO("Task 1: Hover Pose done");
-    // { 
-    //   geometry_msgs::Pose target_pose_hover;
-    //   tf2::Quaternion orientation;
-    //   orientation.setRPY(-tau/2, 0, -tau/8);
-    //   target_pose_hover.orientation = tf2::toMsg(orientation);
-    //   target_pose_hover.position.x = 0.502;
-    //   target_pose_hover.position.y = -0.2;
-    //   target_pose_hover.position.z = 1.5;
-      
-    //   performRLStep(group_arm, target_pose_hover);
-    //   ROS_INFO("Task 1: Hover Pose done.");
-    // }
+
     
-    // state.data = 2;
-    // pose_state_pub.publish(state);
-    // pickPose(group_arm , "down");
-    // ROS_INFO("Task 2: Pick Pose done");
+    //Move above holder and down for picking object and up again
+    // ROS_WARN("pickhover start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    
+    // ROS_WARN("pickhover end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(2.0).sleep();
 
     state.data = 2;
     pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-      original_target.position.z -= 0.26; 
-      performRLStep(group_arm, original_target);
-      ROS_INFO("Task 2: Pick Pose done");
-    }
-    
-    // state.data = 3;
-    // pose_state_pub.publish(state);
-    // pick(group_arm);
-    // ROS_INFO("Task 3: Pick done");
-    //ros::WallDuration(2.0).sleep();
-    // state.data = 4;
-    // pose_state_pub.publish(state);
-    // pickPose(group_arm , "up");
 
-    // state.data = 5;
-    // pose_state_pub.publish(state);
-    // hoverPlacePose(group_arm);
+
+    // ROS_WARN("pickdown start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    pickPose(group_arm , "down");
+    // ROS_WARN("pickdown end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(2.0).sleep();
+
+
+    state.data = 3;
+    pose_state_pub.publish(state);
+
+    // ROS_WARN("closehand start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    pick(group_arm);
+    // ROS_WARN("closehand end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(2.0).sleep();
 
     state.data = 4;
     pose_state_pub.publish(state);
-   {
-    geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-    original_target.position.z += 0.26; 
-    performRLStep(group_arm, original_target);
-    ROS_INFO("Task 4: Lift up done");
-    }
-    //ros::WallDuration(2.0).sleep();
 
+    // ROS_WARN("pickup start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    pickPose(group_arm , "up");
+    // ROS_WARN("pickup end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(2.0).sleep();
 
     state.data = 5;
     pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose original_target;
-      tf2::Quaternion orientation;
-      orientation.setRPY(-tau/2, 0, -tau/8);
-      original_target.orientation = tf2::toMsg(orientation);
-      original_target.position.x = 0.502; 
-      original_target.position.y = 0.2;
-      original_target.position.z = 1.5;
-      performRLStep(group_arm, original_target);
-      ROS_INFO("Task 5: Hover Place Pose done");
-  }
-    //ros::WallDuration(1.0).sleep();
+
+    //Move to placing pose and place object
+    // ROS_WARN("placehover start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    hoverPlacePose(group_arm);
+    // ROS_WARN("placehover end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(3.0).sleep();
 
     state.data = 6;
     pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose target_pose_place = group_arm.getCurrentPose().pose;
-      target_pose_place.position.z -= 0.26;
-      performRLStep(group_arm, target_pose_place);
-      ROS_INFO("Task 6: Place Pose (down) done.");
-  }
+
+    // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    PlacePose(group_arm , "down");
+    // ROS_WARN("hover end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(3.0).sleep();
 
     state.data = 7;
     pose_state_pub.publish(state);
+
+    // ROS_WARN("losehand start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
     openHand(group_hand);
+    // ROS_WARN("losehand end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(3.0).sleep();
+
+
     group_arm.detachObject(object_to_attach.id);
-    ROS_INFO("Task 7: Open Hand done");
-    
+
     state.data = 8;
     pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose target_pose_place_up = group_arm.getCurrentPose().pose;
-      target_pose_place_up.position.z += 0.26;
-      performRLStep(group_arm, target_pose_place_up);
-      ROS_INFO("Task 8: Place Pose (up) done.");
-  }
-    
+
+    // Move up and to init pose
+    // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    PlacePose(group_arm , "up");
+    // ROS_WARN("Placeup end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    //ros::WallDuration(3.0).sleep();
     state.data = 9;
     pose_state_pub.publish(state);
 
-    // initPose(group_arm);
-    // ROS_INFO("Task 9: Init Pose done.");
-   
-    {
-        geometry_msgs::Pose target_pose_init;
-        tf2::Quaternion orientation;
-        orientation.setRPY(-tau/2, 0, -tau/8);
-        target_pose_init.orientation = tf2::toMsg(orientation);
-        target_pose_init.position.x = 0.5;
-        target_pose_init.position.y = 0.0;
-        target_pose_init.position.z = 1.5;
-
-        performRLStep(group_arm, target_pose_init);
-        ROS_INFO("Task 9: Init Pose done.");
-    }
-    
-    
+    // ROS_WARN("Gotoinit start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    initPose(group_arm);
+    // ROS_WARN("Gotoinit end at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
     state.data = 404;
     pose_state_pub.publish(state);
+
     ros::WallDuration(2.0).sleep();
     ROS_WARN("round end");
-
-    std_msgs::Int32 episodeMsg;
-    episodeMsg.data = i;
-    episode_pub.publish(episodeMsg);
-    ROS_INFO("Episode %d published", i);
+    // ros::WallDuration(2.0).sleep();
+    // ROS_WARN("--------------------");
   
   }
   ros::shutdown();
