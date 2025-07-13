@@ -121,10 +121,7 @@ if __name__ == "__main__":
     rospy.init_node('PPO_trainer', anonymous=True)
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
-
-    # Publishers
-    action_pub = rospy.Publisher("/rl_action", Float32MultiArray, queue_size=10, latch=True)
-
+    
     # Subscribers
     #rospy.Subscriber("/start_signal", Bool, start_signal_callback)
     #rospy.Subscriber("/pose_state", Int32, pose_state_callback)

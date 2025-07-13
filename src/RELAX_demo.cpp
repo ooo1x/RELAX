@@ -310,37 +310,6 @@ void pick(moveit::planning_interface::MoveGroupInterface& move_group)
   
 }
 
-void pick2(moveit::planning_interface::MoveGroupInterface& move_group)
-{
-    std::vector<moveit_msgs::Grasp> grasps;
-    grasps.resize(1);
-
-    grasps[0].grasp_pose.header.frame_id = "panda_link0";
-    grasps[0].grasp_pose.pose.orientation.w = 1.0;
-    grasps[0].grasp_pose.pose.position.x = 0.5;
-    grasps[0].grasp_pose.pose.position.y = -0.2;
-    grasps[0].grasp_pose.pose.position.z = 0.145 / 2.0;
-
-    grasps[0].pre_grasp_posture.joint_names.resize(2, "panda_finger_joint1");
-    grasps[0].pre_grasp_posture.joint_names[1] = "panda_finger_joint2";
-    grasps[0].pre_grasp_posture.points.resize(1);
-    grasps[0].pre_grasp_posture.points[0].positions.resize(2);
-    grasps[0].pre_grasp_posture.points[0].positions[0] = 0.04; 
-    grasps[0].pre_grasp_posture.points[0].positions[1] = 0.04;
-    grasps[0].pre_grasp_posture.points[0].time_from_start = ros::Duration(0.5);
-
-    closedGripper(grasps[0].grasp_posture);
-
-    grasps[0].pre_grasp_approach.direction.header.frame_id = "panda_link0";
-    grasps[0].pre_grasp_approach.direction.vector.z = -1.0; 
-    grasps[0].pre_grasp_approach.min_distance = 0.05;       
-    grasps[0].pre_grasp_approach.desired_distance = 0.1;   
-
-    move_group.setSupportSurfaceName("table1");
-    move_group.pick("cylinder1", grasps);
-}
-
-
 ///////////////////////////////////////////////////////////////////////////////////////
 // Plan and execute open hand
 
@@ -443,13 +412,22 @@ void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
   // ROS_INFO("Published RL action request with target pose. Waiting for response...");
 
   ros::Rate r(100);
-  while(ros::ok() && !g_rl_pose_received)
+  double timeout_sec = 10.0; 
+  ros::Time start_time = ros::Time::now();
+
+  while (ros::ok() && !g_rl_pose_received)
   {
+    if ((ros::Time::now() - start_time).toSec() > timeout_sec)
+    {
+      ROS_ERROR("Timeout waiting for RL resolved pose!");
+      return; 
+    }
     r.sleep();
   }
 
   if (g_rl_pose_received)
   {
+    // ROS_INFO_STREAM("Received RL-resolved pose: " << g_resolved_rl_pose);
     move_group.setPoseTarget(g_resolved_rl_pose);
     move_group.move();
     // ROS_INFO("Move execution with RL-resolved pose complete.");
@@ -459,6 +437,7 @@ void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     ROS_ERROR("Failed to receive RL pose in time or ROS is shutting down.");
   }
 }
+
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv)
@@ -555,19 +534,19 @@ int main(int argc, char** argv)
     //   ROS_INFO("Task 1: Hover Pose done.");
     // }
     
-    // state.data = 2;
-    // pose_state_pub.publish(state);
-    // pickPose(group_arm , "down");
-    // ROS_INFO("Task 2: Pick Pose done");
-
     state.data = 2;
     pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-      original_target.position.z -= 0.26; 
-      performRLStep(group_arm, original_target);
-      ROS_INFO("Task 2: Pick Pose done");
-    }
+    pickPose(group_arm , "down");
+    ROS_INFO("Task 2: Pick Pose done");
+
+    // state.data = 2;
+    // pose_state_pub.publish(state);
+    // {
+    //   geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+    //   original_target.position.z -= 0.26; 
+    //   performRLStep(group_arm, original_target);
+    //   ROS_INFO("Task 2: Pick Pose done");
+    // }
     
     // state.data = 3;
     // pose_state_pub.publish(state);
@@ -617,39 +596,42 @@ int main(int argc, char** argv)
       ROS_INFO("Task 6: Place Pose (down) done.");
   }
 
-    state.data = 7;
-    pose_state_pub.publish(state);
-    openHand(group_hand);
-    group_arm.detachObject(object_to_attach.id);
-    ROS_INFO("Task 7: Open Hand done");
+    // state.data = 7;
+    // pose_state_pub.publish(state);
+    // openHand(group_hand);
+    // group_arm.detachObject(object_to_attach.id);
+    // ROS_INFO("Task 7: Open Hand done");
     
-    state.data = 8;
-    pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose target_pose_place_up = group_arm.getCurrentPose().pose;
-      target_pose_place_up.position.z += 0.26;
-      performRLStep(group_arm, target_pose_place_up);
-      ROS_INFO("Task 8: Place Pose (up) done.");
-  }
+    // state.data = 8;
+    // pose_state_pub.publish(state);
+    // PlacePose(group_arm , "up");
+    // ROS_INFO("Task 8: Place Pose (up) done.");
+    
+
+  //   {
+  //     geometry_msgs::Pose target_pose_place_up = group_arm.getCurrentPose().pose;
+  //     target_pose_place_up.position.z += 0.26;
+  //     performRLStep(group_arm, target_pose_place_up);
+  //     ROS_INFO("Task 8: Place Pose (up) done.");
+  // }
     
     state.data = 9;
     pose_state_pub.publish(state);
-
-    // initPose(group_arm);
-    // ROS_INFO("Task 9: Init Pose done.");
+    initPose(group_arm);
+    ROS_INFO("Task 9: Init Pose done.");
    
-    {
-        geometry_msgs::Pose target_pose_init;
-        tf2::Quaternion orientation;
-        orientation.setRPY(-tau/2, 0, -tau/8);
-        target_pose_init.orientation = tf2::toMsg(orientation);
-        target_pose_init.position.x = 0.5;
-        target_pose_init.position.y = 0.0;
-        target_pose_init.position.z = 1.5;
+    // {
+    //     geometry_msgs::Pose target_pose_init;
+    //     tf2::Quaternion orientation;
+    //     orientation.setRPY(-tau/2, 0, -tau/8);
+    //     target_pose_init.orientation = tf2::toMsg(orientation);
+    //     target_pose_init.position.x = 0.5;
+    //     target_pose_init.position.y = 0.0;
+    //     target_pose_init.position.z = 1.5;
 
-        performRLStep(group_arm, target_pose_init);
-        ROS_INFO("Task 9: Init Pose done.");
-    }
+    //     performRLStep(group_arm, target_pose_init);
+    //     ROS_INFO("Task 9: Init Pose done.");
+    // }
     
     
     state.data = 404;
