@@ -31,10 +31,10 @@ class FrankaRLEnv(Env):
 
         # Set action space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
-        self.MAX_DELTA = 0.1
+        self.MAX_DELTA = 0.05
 
         # ROS communication
-        self.resolved_pose_pub = rospy.Publisher("/rl/action_resolved", Pose, queue_size=1)
+        self.resolved_pose_pub = rospy.Publisher("/rl/action_resolved", Pose, queue_size=1, latch=True)
         self.last_move_status = None
         rospy.Subscriber('/move_group/result',MoveGroupActionResult,self._move_group_result_cb,queue_size=1)
         self.distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
@@ -51,24 +51,27 @@ class FrankaRLEnv(Env):
         self.ready_for_rl_request = False 
         self.tfBuffer = tf2_ros.Buffer()
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
+        self.had_collision = False
+        self.had_planning_failure = False
 
         rospy.loginfo("FrankaRLEnv initialized successfully.")
     
     def _request_callback(self, msg: Pose):
-        rospy.logwarn(f">>> Received RL action request <<< pose: {msg.position.x}, {msg.position.y}, {msg.position.z}")
+        # rospy.logwarn(f">>> Received RL action request <<< pose: {msg.position.x}, {msg.position.y}, {msg.position.z}")
         
         self.current_request = msg
         self.request_event.set()
     
     def _pose_state_callback(self, msg):
             self.pose_state = msg.data
-            if self.pose_state == 4:
+            if self.pose_state in {4, 5}: 
                 self.ready_for_rl_request = True
-            elif self.pose_state == 404:
+            if self.pose_state == 404: 
                 self.episode_is_over = True
-
+            else:
+                self.episode_is_over = False
     def _move_group_result_cb(self, msg: MoveGroupActionResult):
-        rospy.loginfo(f"MoveIt result callback: status={msg.status.status}, text='{msg.status.text}'")
+        # rospy.loginfo(f"MoveIt result callback: status={msg.status.status}, text='{msg.status.text}'")
         self.last_move_status = msg.status.status
         self.move_result_received = True
     
@@ -133,11 +136,8 @@ class FrankaRLEnv(Env):
     def _compute_reward(self, planning_failed):
         TARGET_REWARD_WEIGHT = 100.0      
         COLLISION_THRESHOLD = 0.20        
-        GOAL_THRESHOLD = 0.05             
-
         PENALTY_COLLISION = -200          
-        REWARD_GOAL_REACHED = 300         
-        PENALTY_PLANNING_FAILURE = -50    
+        PENALTY_PLANNING_FAILURE = -20    
 
         if planning_failed:
             rospy.logwarn("Planning failed. Applying penalty.")
@@ -145,14 +145,22 @@ class FrankaRLEnv(Env):
 
         ee_position = np.array(self.get_ee_position(), dtype=np.float32)
         target_pos_np = np.array([
-            self.resolved_pose.position.x,
-            self.resolved_pose.position.y,
-            self.resolved_pose.position.z
+            self.current_request.position.x,
+            self.current_request.position.y,
+            self.current_request.position.z
         ])
 
         distance_to_target = np.linalg.norm(ee_position - target_pos_np)
 
-        target_reward = -distance_to_target * TARGET_REWARD_WEIGHT
+        if self.previous_distance_to_target is None:
+            rospy.logwarn("previous_distance_to_target was None. Setting delta_dist=0.")
+            delta_dist = 0.0
+        else:
+            delta_dist = self.previous_distance_to_target - distance_to_target
+       
+        target_reward = delta_dist * TARGET_REWARD_WEIGHT 
+
+        self.previous_distance_to_target = distance_to_target
 
         min_dist_to_obstacle = min([np.linalg.norm(ee_position - obs_pos) for obs_pos in self.obstacles])
     
@@ -160,51 +168,46 @@ class FrankaRLEnv(Env):
             rospy.logwarn("Collision detected! Applying penalty.")
             return PENALTY_COLLISION, True
 
-        success_reward = 0.0
-        if distance_to_target < GOAL_THRESHOLD:
-            rospy.loginfo("Goal reached! Applying big reward.")
-            success_reward = REWARD_GOAL_REACHED
-
-        total_reward = target_reward + success_reward
+        total_reward = target_reward 
 
         return total_reward, False
     
     def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
-        
-        self.episode_is_over = False
-        self.ready_for_rl_request = False
-        self.current_episode_steps = 0
-        self.current_request = None
-        self.previous_distance_to_target = None
+            super().reset(seed=seed)
+            
+            self.had_collision = False
+            self.had_planning_failure = False
+            self.episode_is_over = False
+            self.visited_states = set() 
+            self.ready_for_rl_request = False
+            self.current_episode_steps = 0
+            self.current_request = None
+            
+            self.previous_distance_to_target = None
 
-        rospy.loginfo("Env Reset.")
-
-        while not self.ready_for_rl_request and not rospy.is_shutdown():
-            rospy.sleep(0.1)
-        
-        while self.request_sub.get_num_connections() == 0 and not rospy.is_shutdown():
-            # rospy.logwarn_throttle(2, "Waiting for C++ publisher to connect to /rl/action_request...")
-            rospy.sleep(0.2)
-        
-        self.request_event.clear()
-        event_is_set = self.request_event.wait(timeout=15.0)
-
-        if not event_is_set:
-            # rospy.logerr("Timeout on reset. Publisher is connected, but did not send a request in time.")
-            obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-            return obs, {'error': 'reset_timeout'}
-
-        # rospy.loginfo("Received initial request for the new episode.")
-        obs = self._get_observation()
-        return obs, {}
+            rospy.loginfo("Env Reset completed. Ready for the first step.")
+            
+            return np.zeros(self.observation_space.shape, dtype=np.float32), {}
 
     def step(self, action):
 
-        rospy.loginfo(f"self.current_request: {self.current_request}")
+        rospy.loginfo(">>> Entered step()")
 
-        if self.current_request is None:
-            rospy.logwarn("No action request available. Waiting for C++ up to 10s...")
+
+        # rospy.loginfo(f"self.current_request: {self.current_request}")
+        self.request_event.clear()
+        self.request_event.wait()  # Wait for the action request to be set
+
+        ee_position_before_move = np.array(self.get_ee_position(), dtype=np.float32)
+        target_pos_np = np.array([
+            self.current_request.position.x,
+            self.current_request.position.y,
+            self.current_request.position.z
+        ])
+        self.previous_distance_to_target = np.linalg.norm(ee_position_before_move - target_pos_np)
+        
+
+        rospy.loginfo("Action request received. Resolving pose...")
 
         self.original_target_pose = deepcopy(self.current_request) 
 
@@ -217,11 +220,17 @@ class FrankaRLEnv(Env):
         self.move_result_received = False 
         self.last_move_status = None
         self.resolved_pose_pub.publish(self.resolved_pose)
+        rospy.loginfo(f"Published resolved pose: {self.resolved_pose.position.x}, {self.resolved_pose.position.y}, {self.resolved_pose.position.z}")
 
-        # rospy.logwarn(f"Publishing resolved pose: {self.resolved_pose.position.x}, {self.resolved_pose.position.y}, {self.resolved_pose.position.z}")
+        rate = rospy.Rate(50)
+        timeout_sec = 10
+        start_time = rospy.Time.now().to_sec()
 
-        while not self.move_result_received and not rospy.is_shutdown():
-            rospy.sleep(2)
+        while not rospy.is_shutdown() and not self.move_result_received:
+            if rospy.Time.now().to_sec() - start_time > timeout_sec:
+                rospy.logwarn("Timeout waiting for move result!")
+                break
+            rate.sleep()
         
         # rospy.loginfo(f"Move result received with status: {self.last_move_status}")
 
@@ -229,17 +238,30 @@ class FrankaRLEnv(Env):
 
         reward, collision = self._compute_reward(planning_failed) 
         obs = self._get_observation()
+
+        if collision:
+            self.had_collision = True
+        if planning_failed:
+            self.had_planning_failure = True
         
         self.current_episode_steps += 1
+
+        REQUIRED_STATES = {1, 2, 4, 5, 9}
+
+        if self.episode_is_over:
+            if REQUIRED_STATES.issubset(self.visited_states):
+                rospy.loginfo("Episode ended with full state sequence.")
+                if  not self.had_collision:
+                    reward += 300
+
         terminated = self.episode_is_over
         truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
-
-        if self.episode_is_over and not (collision or planning_failed):
-            reward += 200
-        
+       
         info = {'collision': collision, 'planning_failed': planning_failed}
         print(f"Step: {self.current_episode_steps}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
-        
+
+        rospy.loginfo(">>> Finished step()")
+
         return obs, reward, terminated, truncated, info
 
     def render(self, mode='human'):

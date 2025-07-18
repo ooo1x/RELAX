@@ -82,7 +82,7 @@ if __name__ == "__main__":
 
     # --- Create Environment and Load Normalization Stats ---
     # 1. Create the base environment
-    env_lambda = lambda: FrankaRLEnv(get_ee_position=lambda: end_effector_position)
+    env_lambda = lambda: FrankaRLEnv()
     eval_env = make_vec_env(env_lambda, n_envs=1)
 
     # 2. Load the normalization stats and wrap the environment
@@ -97,7 +97,7 @@ if __name__ == "__main__":
     model = DDPG.load(model_path, env=eval_env)
 
     # --- Run Evaluation Loop ---
-    num_eval_episodes = 50
+    num_eval_episodes = 100
     rospy.loginfo(f"[EVAL] Starting evaluation for {num_eval_episodes} episodes...")
     
     all_rewards = []

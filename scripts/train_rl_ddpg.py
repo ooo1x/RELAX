@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
     n_actions = norm_vec_env.action_space.shape[-1]
     action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
-    MAX_CPP_EPISODES = 499 
+    MAX_CPP_EPISODES = 999 
 
     is_model_loaded = load_model_path and os.path.exists(load_model_path) and os.path.exists(load_stats_path)
 
@@ -124,10 +124,10 @@ if __name__ == "__main__":
         rospy.loginfo("[TRAIN] No loadable model found or --new flag specified. Creating a new one.")
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
                      gamma=GAMMA, tensorboard_log=TENSORBOARD_LOG_DIR,
-                     buffer_size=200000, learning_starts=10000)
+                     buffer_size=100000, learning_starts=1000)
 
     checkpoint_callback = CheckpointCallback(
-        save_freq=100000,
+        save_freq=800,
         save_path=save_checkpoint_dir, 
         name_prefix="ddpg_franka",
         save_replay_buffer=True,

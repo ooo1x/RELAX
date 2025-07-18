@@ -116,8 +116,8 @@ void pickPose(moveit::planning_interface::MoveGroupInterface& move_group_interfa
   moveit::planning_interface::MoveGroupInterface::Plan cartesianPlan;
   move_group_interface.setStartStateToCurrentState();
 
-  move_group_interface.setMaxVelocityScalingFactor(0.2);
-  move_group_interface.setMaxAccelerationScalingFactor(0.1);
+  move_group_interface.setMaxVelocityScalingFactor(1);
+  move_group_interface.setMaxAccelerationScalingFactor(1);
 
   std::vector<geometry_msgs::Pose> waypoints;
 
@@ -197,8 +197,8 @@ void PlacePose(moveit::planning_interface::MoveGroupInterface& move_group_interf
   moveit::planning_interface::MoveGroupInterface::Plan cartesianPlan;
   move_group_interface.setStartStateToCurrentState();
 
-  move_group_interface.setMaxVelocityScalingFactor(0.2);
-  move_group_interface.setMaxAccelerationScalingFactor(0.1);
+  move_group_interface.setMaxVelocityScalingFactor(1);
+  move_group_interface.setMaxAccelerationScalingFactor(1);
 
   std::vector<geometry_msgs::Pose> waypoints;
 
@@ -214,7 +214,7 @@ void PlacePose(moveit::planning_interface::MoveGroupInterface& move_group_interf
   waypoints.push_back(target_pose_place); 
 
   moveit_msgs::RobotTrajectory trajectory_msg;
-  move_group_interface.setPlanningTime(10.0);
+  move_group_interface.setPlanningTime(2);
  
   double fraction = move_group_interface.computeCartesianPath(waypoints,
                                                0.01,  // eef_step
@@ -409,7 +409,7 @@ void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
   g_rl_pose_received = false;
 
   g_rl_request_pub.publish(target_pose);
-  // ROS_INFO("Published RL action request with target pose. Waiting for response...");
+  ROS_INFO(" [C++] Published RL action request with target pose. Waiting for response...");
 
   ros::Rate r(100);
   double timeout_sec = 10.0; 
@@ -455,7 +455,7 @@ int main(int argc, char** argv)
   g_rl_request_pub = nh.advertise<geometry_msgs::Pose>("/rl/action_request", 1, true);
 
 
-  ROS_INFO("Publishing start signal...");
+  ROS_INFO(" [C++] Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
   start_signal_pub.publish(start_msg);
@@ -477,11 +477,11 @@ int main(int argc, char** argv)
   
   // Set parameters for group like planner, speed, acceleration
   group_arm.setPlannerId("RRTConnect");
-  group_arm.setMaxVelocityScalingFactor(0.2);
-  group_arm.setMaxAccelerationScalingFactor(0.1);
+  group_arm.setMaxVelocityScalingFactor(1);
+  group_arm.setMaxAccelerationScalingFactor(1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 500 ;i = i + 1)
+  for (int i = 1; i < 1000 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -552,6 +552,7 @@ int main(int argc, char** argv)
     // pose_state_pub.publish(state);
     // pick(group_arm);
     // ROS_INFO("Task 3: Pick done");
+    
     //ros::WallDuration(2.0).sleep();
     // state.data = 4;
     // pose_state_pub.publish(state);
@@ -585,16 +586,19 @@ int main(int argc, char** argv)
       performRLStep(group_arm, original_target);
       ROS_INFO("Task 5: Hover Place Pose done");
   }
-    //ros::WallDuration(1.0).sleep();
+    // ros::WallDuration(1.0).sleep();
 
-    state.data = 6;
-    pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose target_pose_place = group_arm.getCurrentPose().pose;
-      target_pose_place.position.z -= 0.26;
-      performRLStep(group_arm, target_pose_place);
-      ROS_INFO("Task 6: Place Pose (down) done.");
-  }
+    // state.data = 6;
+    // pose_state_pub.publish(state);
+    // PlacePose(group_arm , "down");
+    // ROS_INFO("Task 6: Place Pose (down) done.");
+
+  //   {
+  //     geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+  //     original_target.position.z -= 0.26;
+  //     performRLStep(group_arm, original_target);
+  //     ROS_INFO("Task 6: Place Pose (down) done.");
+  // }
 
     // state.data = 7;
     // pose_state_pub.publish(state);
@@ -609,9 +613,9 @@ int main(int argc, char** argv)
     
 
   //   {
-  //     geometry_msgs::Pose target_pose_place_up = group_arm.getCurrentPose().pose;
-  //     target_pose_place_up.position.z += 0.26;
-  //     performRLStep(group_arm, target_pose_place_up);
+  //     geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+  //     original_target.position.z += 0.26;
+  //     performRLStep(group_arm, original_target);
   //     ROS_INFO("Task 8: Place Pose (up) done.");
   // }
     
@@ -636,7 +640,7 @@ int main(int argc, char** argv)
     
     state.data = 404;
     pose_state_pub.publish(state);
-    ros::WallDuration(2.0).sleep();
+    // ros::WallDuration(2.0).sleep();
     ROS_WARN("round end");
 
     std_msgs::Int32 episodeMsg;
