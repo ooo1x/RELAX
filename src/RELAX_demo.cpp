@@ -32,7 +32,15 @@ bool   GotFirstAction = false;
 ros::Publisher g_rl_request_pub;      
 geometry_msgs::Pose g_resolved_rl_pose; 
 bool g_rl_pose_received = false;       
+bool g_python_is_ready = false;
 
+void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
+{
+    if (msg->data)
+    {
+        g_python_is_ready = true;
+    }
+}
 
 void rlActionCallback(const std_msgs::Float32MultiArrayConstPtr& msg)
 {
@@ -409,7 +417,7 @@ void performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
   g_rl_pose_received = false;
 
   g_rl_request_pub.publish(target_pose);
-  ROS_INFO(" [C++] Published RL action request with target pose. Waiting for response...");
+  // ROS_INFO(" Published RL action request with target pose. Waiting for response...");
 
   ros::Rate r(100);
   double timeout_sec = 10.0; 
@@ -452,10 +460,12 @@ int main(int argc, char** argv)
   ros::Subscriber faultFlagSub =nh.subscribe("/fault_flag", 10, faultFlagCallback);
   ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
   ros::Subscriber rlResolvedSub = nh.subscribe("/rl/action_resolved", 1, resolvedPoseCallback);
-  g_rl_request_pub = nh.advertise<geometry_msgs::Pose>("/rl/action_request", 1, true);
+  ros::Publisher request_pub = nh.advertise<geometry_msgs::Pose>("/rl/action_request", 1);
+  g_rl_request_pub = request_pub;
+  ros::Subscriber python_ready_sub = nh.subscribe("/rl/ready_for_next", 1, pythonReadyCallback);
 
 
-  ROS_INFO(" [C++] Publishing start signal...");
+  ROS_INFO(" Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
   start_signal_pub.publish(start_msg);
@@ -572,6 +582,15 @@ int main(int argc, char** argv)
     }
     //ros::WallDuration(2.0).sleep();
 
+    // ROS_INFO("Waiting for Python node to be ready for the next step...");
+    g_python_is_ready = false; 
+    ros::Rate r(10); // 10 Hz
+    while(ros::ok() && !g_python_is_ready)
+    {
+        // ros::spinOnce(); // AsyncSpinner正在处理回调，这里不需要
+        r.sleep();
+    }
+    // ROS_INFO("Python is ready. Proceeding to Task 5.");
 
     state.data = 5;
     pose_state_pub.publish(state);

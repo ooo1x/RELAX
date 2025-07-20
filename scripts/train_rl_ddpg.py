@@ -111,15 +111,18 @@ if __name__ == "__main__":
 
     n_actions = norm_vec_env.action_space.shape[-1]
     action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
-    MAX_CPP_EPISODES = 999 
+    MAX_CPP_EPISODES = 3
 
     is_model_loaded = load_model_path and os.path.exists(load_model_path) and os.path.exists(load_stats_path)
+    tensorboard_run_log_dir = os.path.join(TENSORBOARD_LOG_DIR, current_run_id)
 
     if is_model_loaded:
         rospy.loginfo(f"[TRAIN] Loading existing model from {load_model_path}")
         norm_vec_env = VecNormalize.load(load_stats_path, vec_env)
         model = DDPG.load(load_model_path, env=norm_vec_env)
         rospy.loginfo("[TRAIN] Model and normalization stats loaded successfully.")
+        new_logger = configure(tensorboard_run_log_dir, ["tensorboard"])
+        model.set_logger(new_logger)
     else:
         rospy.loginfo("[TRAIN] No loadable model found or --new flag specified. Creating a new one.")
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
