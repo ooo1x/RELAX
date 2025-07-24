@@ -11,6 +11,9 @@ from moveit_msgs.msg import MoveGroupActionResult
 from actionlib_msgs.msg import GoalStatus
 import tf2_ros
 import threading
+from moveit_msgs.msg import CollisionObject
+from shape_msgs.msg import SolidPrimitive
+from moveit_commander import PlanningSceneInterface
 
 class FrankaRLEnv(Env):
     def __init__(self):
@@ -19,10 +22,11 @@ class FrankaRLEnv(Env):
         rospy.loginfo("Initializing FrankaRLEnv...")
 
         # Set obstacles and goals
-        self.obstacle1 = np.array([0.7, -0.25, 1.48])
-        self.obstacle2 = np.array([0.7,  0.25, 1.48])
-        self.obstacle3 = np.array([0.7, 0.0, 1.64])
+        self.obstacle1 = np.array([0.75, -0.25, 1.48])
+        self.obstacle2 = np.array([0.75,  0.25, 1.48])
+        self.obstacle3 = np.array([0.75, 0.0, 1.64])
         self.obstacles = [self.obstacle1, self.obstacle2, self.obstacle3]
+        self.scene = PlanningSceneInterface()
 
         # Set state space: ee_x, ee_y, ee_z, t_x,t_y,t_z, [dx1, dy1, dz1], [dx2, dy2, dz2], [dx3, dy3, dz3]
         obs_dim = 15
@@ -37,7 +41,7 @@ class FrankaRLEnv(Env):
         self.resolved_pose_pub = rospy.Publisher("/rl/action_resolved", Pose, queue_size=1, latch=True)
         self.last_move_status = None
         rospy.Subscriber('/move_group/result',MoveGroupActionResult,self._move_group_result_cb,queue_size=1)
-        self.distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
+        #self.distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
         rospy.Subscriber('/pose_state', Int32, self._pose_state_callback, queue_size=1)
         self.request_sub = rospy.Subscriber('/rl/action_request', Pose, self._request_callback, queue_size=1)
         self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
@@ -54,6 +58,8 @@ class FrankaRLEnv(Env):
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
         self.had_collision = False
         self.had_planning_failure = False
+        self._add_obstacles_to_scene()
+        self.visited_states = set()
 
         rospy.loginfo("FrankaRLEnv initialized successfully.")
     
@@ -70,12 +76,48 @@ class FrankaRLEnv(Env):
             
             if self.pose_state in {4, 5}: 
                 self.ready_for_rl_request = True
-            if self.pose_state == 404: 
+            if self.pose_state == 9: 
                 self.episode_is_over = True
 
     def _move_group_result_cb(self, msg: MoveGroupActionResult):
         self.last_move_status = msg.status.status
         self.move_result_received = True
+    
+    def _add_obstacles_to_scene(self):
+        #rospy.loginfo("Adding obstacles to the planning scene.")
+        
+        for obs_name in ["obstacle1", "obstacle2", "obstacle3"]:
+            self.scene.remove_world_object(obs_name)
+        
+        rospy.sleep(1) 
+
+        obstacle_radius = 0.2 
+
+        for i, obs_pos in enumerate(self.obstacles):
+            obs_name = f"obstacle{i+1}"
+            collision_object = CollisionObject()
+            collision_object.header.frame_id = "world"
+            collision_object.id = obs_name
+
+            primitive = SolidPrimitive()
+            primitive.type = primitive.SPHERE
+            primitive.dimensions = [obstacle_radius]
+
+            pose = Pose()
+            pose.position.x = obs_pos[0]
+            pose.position.y = obs_pos[1]
+            pose.position.z = obs_pos[2]
+            pose.orientation.w = 1.0 
+
+            collision_object.primitives.append(primitive)
+            collision_object.primitive_poses.append(pose)
+            
+            collision_object.operation = collision_object.ADD
+
+            self.scene.add_object(collision_object)
+
+        rospy.sleep(1) 
+        #rospy.loginfo("Obstacles added to the planning scene successfully.")
     
     def get_ee_position(self):
         try:
@@ -99,17 +141,17 @@ class FrankaRLEnv(Env):
     def _get_observation(self):
         ee_position = np.array(self.get_ee_position(), dtype=np.float32)
 
-        try:
-            dist1 = np.linalg.norm(ee_position - self.obstacle1)
-            dist2 = np.linalg.norm(ee_position - self.obstacle2)
-            dist3 = np.linalg.norm(ee_position - self.obstacle3)
+        # try:
+        #     dist1 = np.linalg.norm(ee_position - self.obstacle1)
+        #     dist2 = np.linalg.norm(ee_position - self.obstacle2)
+        #     dist3 = np.linalg.norm(ee_position - self.obstacle3)
 
-            distances_msg = Float32MultiArray()
-            distances_msg.data = [dist1, dist2, dist3]
+        #     distances_msg = Float32MultiArray()
+        #     distances_msg.data = [dist1, dist2, dist3]
             
-            self.distances_pub.publish(distances_msg)
-        except Exception as e:
-            rospy.logwarn_throttle(10, f"[FrankaRLEnv] Could not publish distances: {e}")
+        #     self.distances_pub.publish(distances_msg)
+        # except Exception as e:
+        #     rospy.logwarn_throttle(10, f"[FrankaRLEnv] Could not publish distances: {e}")
 
         if self.current_request:
             target_position = np.array([
@@ -138,7 +180,7 @@ class FrankaRLEnv(Env):
         TARGET_REWARD_WEIGHT = 100.0      
         COLLISION_THRESHOLD = 0.20        
         PENALTY_COLLISION = -200          
-        PENALTY_PLANNING_FAILURE = -20    
+        PENALTY_PLANNING_FAILURE = -100    
 
         if planning_failed:
             rospy.logwarn("Planning failed. Applying penalty.")
@@ -241,10 +283,11 @@ class FrankaRLEnv(Env):
         self.current_episode_steps += 1
         
         REQUIRED_STATES = {1, 2, 4, 5, 9}
+        print(f"Visited states: {self.visited_states}, Required states: {REQUIRED_STATES}")
         if self.episode_is_over:
             if REQUIRED_STATES.issubset(self.visited_states):
                 rospy.loginfo("Episode ended with full state sequence.")
-                if not self.had_collision:
+                if not self.had_planning_failure:
                     reward += 300
 
         terminated = self.episode_is_over

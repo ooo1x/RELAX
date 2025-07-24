@@ -1,51 +1,27 @@
-import rospy
-import numpy as np
-import tf2_ros
 import os
 import argparse
 import time
+import numpy as np
+import rospy
 
 from stable_baselines3 import DDPG
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 from franka_rl_env import FrankaRLEnv
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped
 
-# --- Consistent Directory Setup ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DDPG_dir = os.path.join(BASE_DIR, "experiments", "DDPG")
-MODELS_BASE_DIR = os.path.join(DDPG_dir, "models")
-
-end_effector_position = np.zeros(3, dtype=np.float32)
+EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "DDPG") 
+MODELS_BASE_DIR = os.path.join(EXPERIMENTS_DIR, "final_models")
 
 def find_latest_run_dir(base_dir):
-    """Finds the most recent run directory in a given base directory."""
+    """Finds the most recent run directory."""
     if not os.path.exists(base_dir):
         return None
-    
     run_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
     if not run_dirs:
         return None
-    
     run_dirs.sort()
     return run_dirs[-1]
-
-def joint_state_callback(msg):
-    """ROS subscriber callback to get the end-effector position via TF."""
-    global end_effector_position
-    try:
-        # Ensure tfBuffer is available globally or passed correctly
-        trans = tfBuffer.lookup_transform('world', 'panda_hand_tcp', rospy.Time(0))
-        
-        end_effector_position = np.array([
-            trans.transform.translation.x,
-            trans.transform.translation.y,
-            trans.transform.translation.z
-        ], dtype=np.float32)
-
-    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-        rospy.logwarn(f"Transform lookup failed: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a trained DDPG agent for the Franka Robot.")
@@ -55,18 +31,10 @@ if __name__ == "__main__":
 
     rospy.init_node('DDPG_evaluator', anonymous=True)
 
-    tfBuffer = tf2_ros.Buffer()
-    listener = tf2_ros.TransformListener(tfBuffer)
-    rospy.Subscriber("/joint_states", JointState, joint_state_callback, queue_size=1)
-    
-    rospy.loginfo("[EVAL] Waiting for TF transforms to become available...")
-    time.sleep(2.0) # Give time for the TF buffer to fill
-
-    # --- Find Model and Stats to Load ---
     run_id_to_load = args.run_id if args.run_id else find_latest_run_dir(MODELS_BASE_DIR)
 
     if not run_id_to_load:
-        rospy.logerr("[EVAL] No training runs found in 'experiments/DDPG/models/'. Cannot proceed.")
+        rospy.logerr(f"[EVAL] No training runs found in '{MODELS_BASE_DIR}'. Cannot proceed.")
         exit()
         
     rospy.loginfo(f"[EVAL] Using run ID: {run_id_to_load}")
@@ -80,23 +48,16 @@ if __name__ == "__main__":
         rospy.logerr("Please ensure both 'ddpg_franka_model.zip' and 'vec_normalize_stats.pkl' exist.")
         exit()
 
-    # --- Create Environment and Load Normalization Stats ---
-    # 1. Create the base environment
-    env_lambda = lambda: FrankaRLEnv()
-    eval_env = make_vec_env(env_lambda, n_envs=1)
-
-    # 2. Load the normalization stats and wrap the environment
-    # Set training=False to prevent the stats from being updated during evaluation
+    eval_env = make_vec_env(lambda: FrankaRLEnv(), n_envs=1)
+    
     rospy.loginfo(f"[EVAL] Loading normalization stats from: {stats_path}")
     eval_env = VecNormalize.load(stats_path, eval_env)
     eval_env.training = False 
     eval_env.norm_reward = False
 
-    # --- Load the Model ---
     rospy.loginfo(f"[EVAL] Loading trained model from: {model_path}")
     model = DDPG.load(model_path, env=eval_env)
 
-    # --- Run Evaluation Loop ---
     num_eval_episodes = 100
     rospy.loginfo(f"[EVAL] Starting evaluation for {num_eval_episodes} episodes...")
     
@@ -118,9 +79,8 @@ if __name__ == "__main__":
             
             episode_reward += reward
             episode_steps += 1
-
-            info = info[0]
-            if info["collision"]:
+            
+            if "collision" in info[0] and info[0]["collision"]:
                 collided = True
 
         if collided:
@@ -135,16 +95,16 @@ if __name__ == "__main__":
     
     eval_env.close()
 
-    # --- Print Summary ---
     mean_reward = np.mean(all_rewards)
-    std_reward = np.std(all_rewards)
     mean_steps = np.mean(all_steps)
-
     success_rate = (success_count / num_eval_episodes) * 100.0
-    rospy.loginfo("="*50)
-    rospy.loginfo("               Evaluation Summary")
-    rospy.loginfo("="*50)
-    rospy.loginfo(f"Episodes:         {num_eval_episodes}")
-    rospy.loginfo(f"Success:          {success_count} ({success_rate:.2f}%)")
-    rospy.loginfo(f"Failures:         {failure_count} ({100 - success_rate:.2f}%)")
-    rospy.loginfo("="*50)
+    
+    print("\n" + "="*50)
+    print("               Evaluation Summary")
+    print("="*50)
+    print(f"Total Episodes:   {num_eval_episodes}")
+    print(f"Successes:        {success_count} ({success_rate:.2f}%)")
+    print(f"Failures:         {failure_count} ({100 - success_rate:.2f}%)")
+    print(f"Mean Reward:      {mean_reward:.2f}")
+    print(f"Mean Steps:       {mean_steps:.2f}")
+    print("="*50 + "\n")

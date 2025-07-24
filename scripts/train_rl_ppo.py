@@ -1,153 +1,185 @@
-from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
-from franka_rl_env import FrankaRLEnv
-import rospy
-from std_msgs.msg import Int32, Float32MultiArray, Bool
 import os
-import numpy as np
-import tf2_ros
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Pose, PoseStamped
+import re
 import time
-from stable_baselines3.common.logger import configure
-from rosgraph_msgs.msg import Log
 import argparse
+import rospy
+
+from stable_baselines3 import PPO 
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from stable_baselines3.common.logger import configure
 
+from franka_rl_env import FrankaRLEnv
+from std_msgs.msg import Int32
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PPO_dir = os.path.join(BASE_DIR, "experiments", "PPO")
+EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "PPO") 
 
-MODELS_BASE_DIR = os.path.join(PPO_dir, "models")
-CHECKPOINTS_BASE_DIR = os.path.join(PPO_dir, "checkpoints")
-TENSORBOARD_LOG_DIR = os.path.join(PPO_dir, "tensorboard_logs")
+MODELS_DIR = os.path.join(EXPERIMENTS_DIR, "final_models")
+CHECKPOINTS_DIR = os.path.join(EXPERIMENTS_DIR, "checkpoints")
+TENSORBOARD_LOG_DIR = os.path.join(EXPERIMENTS_DIR, "tensorboard_logs")
 
-os.makedirs(MODELS_BASE_DIR, exist_ok=True)
-os.makedirs(CHECKPOINTS_BASE_DIR, exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
+os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
 os.makedirs(TENSORBOARD_LOG_DIR, exist_ok=True)
 
 
+# --- UTILITY FUNCTIONS ---
+def find_latest_run_dir(base_dir):
+    if not os.path.exists(base_dir):
+        return None
+    run_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    if not run_dirs:
+        return None
+    run_dirs.sort()
+    return run_dirs[-1]
+
+def find_latest_checkpoint(ckpt_dir):
+    if not os.path.isdir(ckpt_dir):
+        return None, None
+    model_files = os.listdir(ckpt_dir)
+    pattern = re.compile(r'ppo_franka_(\d+)_steps\.zip') 
+    steps = []
+    for file in model_files:
+        match = pattern.match(file)
+        if match:
+            steps.append(int(match.group(1)))
+    if not steps:
+        return None, None
+    latest_step = max(steps)
+    model_path = os.path.join(ckpt_dir, f'ppo_franka_{latest_step}_steps.zip')
+    vec_path = os.path.join(ckpt_dir, f'ppo_franka_vecnormalize_{latest_step}_steps.pkl') 
+    if os.path.exists(model_path) and os.path.exists(vec_path):
+        return model_path, vec_path
+    return None, None
+
+
+# --- ROS & CALLBACKS (Unchanged) ---
 class RosStateTracker:
     def __init__(self):
         self.current_cpp_episode = 0
         rospy.Subscriber("/episode", Int32, self._cpp_episode_callback)
-
     def _cpp_episode_callback(self, msg):
         self.current_cpp_episode = msg.data
-
     def get_cpp_episode(self):
         return self.current_cpp_episode
-    
-def find_latest_run_dir(base_dir):
-    if not os.path.exists(base_dir):
-        return None
-    
-    run_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
-    if not run_dirs:
-        return None
-    
-    run_dirs.sort()
-    return run_dirs[-1]
-
-class PrintTimestepsCallback(BaseCallback):
-    def __init__(self, verbose=0):
-        super().__init__(verbose)
-
-    def _on_step(self) -> bool:
-        rospy.loginfo(f"[TRAIN] Total timesteps: {self.num_timesteps}")
-        return True  
 
 class StopWhenCppDone(BaseCallback):
-    def __init__(self, get_cpp_episode, max_cpp_episodes, verbose=0):
+    def __init__(self, get_cpp_episode_func, max_cpp_episodes, verbose=0):
         super().__init__(verbose)
-        self.get_cpp_episode = get_cpp_episode
+        self.get_cpp_episode = get_cpp_episode_func
         self.max_cpp_episodes = max_cpp_episodes
-        self.verbose = verbose
-
     def _on_step(self) -> bool:
-        #rospy.sleep(0.001)
-        current_episode = self.get_cpp_episode()
-        return current_episode < self.max_cpp_episodes
+        rospy.sleep(0.001)
+        return self.get_cpp_episode() < self.max_cpp_episodes
 
 
+# --- MAIN SCRIPT ---
 if __name__ == "__main__":
+    rospy.init_node('PPO_trainer', anonymous=True) 
 
-    parser = argparse.ArgumentParser(description="Train ppo agent for Franka Robot, with options to continue or start new.")
-    parser.add_argument("--new", action="store_true", 
-                        help="Force a new training run, ignoring any existing models.")
+    parser = argparse.ArgumentParser(description="Train a PPO agent for the Franka robot.") 
+    parser.add_argument("--new", action="store_true", help="Force a new training run, ignoring all existing models.")
+    parser.add_argument("--continue_latest", action="store_true", help="Continue training from the latest completed run's final model.")
+    parser.add_argument("--load_checkpoint_run", type=str, metavar="RUN_ID", help="Load the latest checkpoint from a specific run ID (e.g., 20250723-173706).")
     args = parser.parse_args()
 
-    rospy.init_node('PPO_trainer', anonymous=True)
-    tfBuffer = tf2_ros.Buffer()
-    listener = tf2_ros.TransformListener(tfBuffer)
-
-    current_run_id = time.strftime("%Y%m%d-%H%M%S")
-    rospy.loginfo(f"Current run ID for saving is: {current_run_id}")
-
-    latest_run_id_to_load = find_latest_run_dir(MODELS_BASE_DIR)
+    # --- Configuration ---
+    MAX_CPP_EPISODES = 2
+    
+    # --- Variable Initialization (Unchanged) ---
     load_model_path = None
     load_stats_path = None
-
-    if not args.new and latest_run_id_to_load:
-        rospy.loginfo(f"Continue mode: Found latest run to load from: {latest_run_id_to_load}")
-        load_model_path = os.path.join(MODELS_BASE_DIR, latest_run_id_to_load, "ppo_franka_model.zip")
-        load_stats_path = os.path.join(MODELS_BASE_DIR, latest_run_id_to_load, "vec_normalize_stats.pkl")
-    elif args.new:
-        rospy.logwarn("New run mode: --new flag was used. Ignoring existing models.")
+    is_resuming_from_checkpoint = False
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    
+    # --- Mode Selection Logic (Unchanged) ---
+    if args.new:
+        rospy.loginfo("Mode: Starting a completely new training run.")
+    elif args.continue_latest:
+        rospy.loginfo("Mode: Continuing from the latest completed run.")
+        latest_run = find_latest_run_dir(MODELS_DIR)
+        if latest_run:
+            run_id = latest_run
+            load_model_path = os.path.join(MODELS_DIR, run_id, "ppo_franka_model.zip") # <--- Changed
+            load_stats_path = os.path.join(MODELS_DIR, run_id, "vec_normalize_stats.pkl")
+            rospy.loginfo(f"Found latest run '{run_id}'. Will load final model and stats.")
+        else:
+            rospy.logwarn("No completed runs found to continue from. Starting a new run instead.")
+    elif args.load_checkpoint_run:
+        rospy.loginfo(f"Mode: Loading latest checkpoint from run '{args.load_checkpoint_run}'.")
+        run_id = args.load_checkpoint_run
+        checkpoint_folder = os.path.join(CHECKPOINTS_DIR, run_id)
+        load_model_path, load_stats_path = find_latest_checkpoint(checkpoint_folder)
+        if load_model_path:
+            is_resuming_from_checkpoint = True
+            rospy.loginfo(f"Found checkpoint to load: {os.path.basename(load_model_path)}")
+        else:
+            rospy.logerr(f"Could not find any valid checkpoints in '{checkpoint_folder}'. Exiting.")
+            exit()
     else:
-        rospy.loginfo("New run mode: No previous run found. Starting a fresh training.")
+        rospy.loginfo("Mode: Defaulting to a new training run (no flags specified).")
 
-    save_checkpoint_dir = os.path.join(CHECKPOINTS_BASE_DIR, current_run_id)
-    model_save_dir = os.path.join(MODELS_BASE_DIR, current_run_id)
-    os.makedirs(model_save_dir, exist_ok=True) 
-    model_save_path = os.path.join(model_save_dir, "ppo_franka_model.zip")
-    stats_save_path = os.path.join(model_save_dir, "vec_normalize_stats.pkl")
+    # --- Setup Paths and Environment --
+    model_save_dir = os.path.join(MODELS_DIR, run_id)
+    checkpoint_save_dir = os.path.join(CHECKPOINTS_DIR, run_id)
+    tensorboard_log_dir = os.path.join(TENSORBOARD_LOG_DIR, run_id)
+    os.makedirs(model_save_dir, exist_ok=True)
+    os.makedirs(checkpoint_save_dir, exist_ok=True)
+    model_final_save_path = os.path.join(model_save_dir, "ppo_franka_model.zip") # <--- Changed
+    stats_final_save_path = os.path.join(model_save_dir, "vec_normalize_stats.pkl")
 
-    rospy.loginfo("[TRAIN] Initializing FrankaRLEnv...")
-    MAX_CPP_EPISODES = 999
-    env = FrankaRLEnv()
-    ros_tracker = RosStateTracker()
+    rospy.loginfo("Initializing FrankaRLEnv...")
+    vec_env = make_vec_env(lambda: FrankaRLEnv(), n_envs=1)
+    norm_vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, gamma=GAMMA)
 
+    # --- Load or Create Model ---
     is_model_loaded = load_model_path and os.path.exists(load_model_path) and os.path.exists(load_stats_path)
-    tensorboard_run_log_dir = os.path.join(TENSORBOARD_LOG_DIR, current_run_id)
 
     if is_model_loaded:
-        rospy.loginfo(f"[TRAIN] Loading existing model from {load_model_path}")
-        model = PPO.load(load_model_path, env=env)
-        rospy.loginfo("[TRAIN] Model and normalization stats loaded successfully.")
-        new_logger = configure(tensorboard_run_log_dir, ["tensorboard"])
+        rospy.loginfo(f"Loading VecNormalize stats from: {load_stats_path}")
+        norm_vec_env = VecNormalize.load(load_stats_path, vec_env)
+        rospy.loginfo(f"Loading PPO model from: {load_model_path}") 
+        model = PPO.load(load_model_path, env=norm_vec_env)
+        rospy.loginfo("Reusing existing TensorBoard logs for continuous tracking.")
+        new_logger = configure(tensorboard_log_dir, ["tensorboard"])
         model.set_logger(new_logger)
     else:
-        model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=TENSORBOARD_LOG_DIR)
+        rospy.loginfo("Creating a new PPO model.") 
+        model = PPO("MlpPolicy", norm_vec_env, verbose=1, 
+                    gamma=0.99,
+                    n_steps=2048, 
+                    batch_size=64, 
+                    tensorboard_log=TENSORBOARD_LOG_DIR)
 
+    # --- Setup Callbacks ---
+    ros_tracker = RosStateTracker()
     checkpoint_callback = CheckpointCallback(
         save_freq=800,
-        save_path=save_checkpoint_dir, 
-        name_prefix="ppo_franka",
-        save_replay_buffer=True,
-        save_vecnormalize=True 
+        save_path=checkpoint_save_dir,
+        name_prefix="ppo_franka", 
+        save_vecnormalize=True
     )
-
     stop_callback = StopWhenCppDone(
-        get_cpp_episode=ros_tracker.get_cpp_episode, 
-        max_cpp_episodes=MAX_CPP_EPISODES, 
-        verbose=1
+        get_cpp_episode_func=ros_tracker.get_cpp_episode,
+        max_cpp_episodes=MAX_CPP_EPISODES
     )
-    callbacks = CallbackList([PrintTimestepsCallback(), checkpoint_callback, stop_callback])
+    callbacks = CallbackList([checkpoint_callback, stop_callback])
 
-    rospy.loginfo("[TRAIN] Starting ppo training...")
-    model.learn(total_timesteps=10000000, callback=callbacks, reset_num_timesteps=not is_model_loaded)
+    # --- Train The Model ---
+    rospy.loginfo(f"Starting PPO training. Run ID: {run_id}") 
+    rospy.loginfo(f"Checkpoints will be saved in: {checkpoint_save_dir}")
+    rospy.loginfo(f"TensorBoard logs are in: {tensorboard_log_dir}")
+    reset_timesteps = not is_model_loaded
+    rospy.loginfo(f"Starting model.learn() with reset_num_timesteps={reset_timesteps}")
     
-    rospy.loginfo("[TRAIN] Training finished. Saving final model and normalization stats...")
-    model.save(model_save_path)
-
-    vec_env = model.get_env()
-    if isinstance(vec_env, VecNormalize):
-        vec_env.save(stats_save_path)
+    model.learn(total_timesteps=10000000, callback=callbacks, reset_num_timesteps=reset_timesteps)
     
-    rospy.loginfo(f"[TRAIN] Final model saved to {model_save_path}")
-    rospy.loginfo(f"[TRAIN] Final stats saved to {stats_save_path}")
-    rospy.loginfo("[TRAIN] Exiting.")
-    
+    # --- Final Save ---
+    rospy.loginfo("Training finished. Saving final model and normalization stats...")
+    model.save(model_final_save_path)
+    norm_vec_env.save(stats_final_save_path)
+    rospy.loginfo(f"Final model saved to: {model_final_save_path}")
+    rospy.loginfo(f"Final stats saved to: {stats_final_save_path}")
+    rospy.loginfo("Exiting.")

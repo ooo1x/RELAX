@@ -1,103 +1,110 @@
-# evaluate.py
-
-import rospy
-import numpy as np
-import tf2_ros
 import os
-import argparse  
+import argparse
+import time
+import numpy as np
+import rospy
 
 from stable_baselines3 import PPO
-from franka_rl_env import FrankaRLEnv  
-from std_msgs.msg import Int32
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Pose, PoseStamped
-import time
-from stable_baselines3.common.logger import configure
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import VecNormalize
+from franka_rl_env import FrankaRLEnv
 
-
-run_id = time.strftime("%Y%m%d-%H%M%S")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-experement_dir = os.path.join(BASE_DIR, "experiments")
-ppo_dir = os.path.join(experement_dir, "ppo")
-checkpoint_dir = os.path.join(ppo_dir, "ppo_checkpoints", run_id)
-tensorboard_log_dir = os.path.join(ppo_dir, "ppo_franka_tensorboard")
-evaluation_dir = os.path.join(ppo_dir, "ppo_franka_evaluation")
+EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "PPO") 
+MODELS_BASE_DIR = os.path.join(EXPERIMENTS_DIR, "final_models")
 
-model_save_path = os.path.join(ppo_dir, "ppo_franka_model", "ppo_franka_model.zip")
-
-
-end_effector_position = np.zeros(3, dtype=np.float32)
-tfBuffer = None 
-
-def joint_state_callback(msg):
-    global end_effector_position
-    try:
-        trans = tfBuffer.lookup_transform('world', 'panda_hand_tcp', rospy.Time(0))
-        panda_pose = PoseStamped()
-        panda_pose.header.frame_id = 'world'
-        panda_pose.header.stamp = rospy.Time.now()
-        panda_pose.pose.position.x = trans.transform.translation.x
-        panda_pose.pose.position.y = trans.transform.translation.y
-        panda_pose.pose.position.z = trans.transform.translation.z
-
-        end_effector_position = (panda_pose.pose.position.x, panda_pose.pose.position.y, panda_pose.pose.position.z)
-
-    except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-        rospy.logwarn("Transform lookup failed!")
+def find_latest_run_dir(base_dir):
+    """Finds the most recent run directory."""
+    if not os.path.exists(base_dir):
+        return None
+    run_dirs = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    if not run_dirs:
+        return None
+    run_dirs.sort()
+    return run_dirs[-1]
 
 if __name__ == "__main__":
-    rospy.init_node('ppo_evaluator', anonymous=True)
+    parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent for the Franka Robot.")
+    parser.add_argument("--run_id", type=str, default=None,
+                        help="Specific run ID to load for evaluation. Defaults to the latest run.")
+    args = parser.parse_args()
 
-    if not os.path.exists(model_save_path):
-        rospy.logerr(f"Model file not found at path: {model_save_path}")
-        rospy.logerr("Please open evaluate.py and update the MODEL_TO_EVALUATE variable.")
+    rospy.init_node('PPO_evaluator', anonymous=True)
+
+    run_id_to_load = args.run_id if args.run_id else find_latest_run_dir(MODELS_BASE_DIR)
+
+    if not run_id_to_load:
+        rospy.logerr(f"[EVAL] No training runs found in '{MODELS_BASE_DIR}'. Cannot proceed.")
+        exit()
+        
+    rospy.loginfo(f"[EVAL] Using run ID: {run_id_to_load}")
+
+    model_load_dir = os.path.join(MODELS_BASE_DIR, run_id_to_load)
+    model_path = os.path.join(model_load_dir, "PPO_franka_model.zip")
+    stats_path = os.path.join(model_load_dir, "vec_normalize_stats.pkl")
+
+    if not os.path.exists(model_path) or not os.path.exists(stats_path):
+        rospy.logerr(f"[EVAL] Model or stats file not found in '{model_load_dir}'.")
+        rospy.logerr("Please ensure both 'PPO_franka_model.zip' and 'vec_normalize_stats.pkl' exist.")
         exit()
 
-    tfBuffer = tf2_ros.Buffer()
-    listener = tf2_ros.TransformListener(tfBuffer)
-    rospy.Subscriber("/joint_states", JointState, joint_state_callback, queue_size=1)
-    rospy.loginfo("[EVAL] Waiting for TF transforms...")
-    rospy.sleep(2.0)
+    eval_env = make_vec_env(lambda: FrankaRLEnv(), n_envs=1)
+    
+    rospy.loginfo(f"[EVAL] Loading normalization stats from: {stats_path}")
+    eval_env = VecNormalize.load(stats_path, eval_env)
+    eval_env.training = False 
+    eval_env.norm_reward = False
 
-    eval_logger = configure(evaluation_dir, ["stdout", "tensorboard"])
+    rospy.loginfo(f"[EVAL] Loading trained model from: {model_path}")
+    model = PPO.load(model_path, env=eval_env)
 
-    env = FrankaRLEnv(get_ee_position=lambda: end_effector_position)
-
-    rospy.loginfo(f"[EVAL] Loading trained model from: {model_save_path}")
-    model = PPO.load(model_save_path, env=env)
-
-    num_eval_episodes = 50
+    num_eval_episodes = 100
     rospy.loginfo(f"[EVAL] Starting evaluation for {num_eval_episodes} episodes...")
     
     all_rewards = []
     all_steps = []
+    success_count = 0
+    failure_count = 0
 
-    for eval_ep in range(num_eval_episodes):
-        obs, info = env.reset()
+    for i in range(num_eval_episodes):
+        obs = eval_env.reset()
         done = False
-        total_reward = 0.0
-        steps = 0
+        episode_reward = 0.0
+        episode_steps = 0
+        collided = False
 
         while not done and not rospy.is_shutdown():
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            total_reward += reward
-            steps += 1
-            done = terminated or truncated
+            obs, reward, done, info = eval_env.step(action)
+            
+            episode_reward += reward
+            episode_steps += 1
+            
+            if "collision" in info[0] and info[0]["collision"]:
+                collided = True
 
-        rospy.loginfo(f"[EVAL] Episode {eval_ep + 1}/{num_eval_episodes} Finished: Total Reward = {total_reward:.2f}")
-        all_rewards.append(total_reward)
-        all_steps.append(steps)
+        if collided:
+            failure_count += 1
+            rospy.logwarn(f"[EVAL] Episode {i+1}: FAIL (Collision) | Reward: {float(episode_reward):.2f} | Steps: {episode_steps}")
+        else:
+            success_count += 1
+            rospy.loginfo(f"[EVAL] Episode {i+1}: SUCCESS (No Collision) | Reward: {float(episode_reward):.2f} | Steps: {episode_steps}")
 
-        eval_logger.record("eval/episode_reward", total_reward)
-        eval_logger.record("eval/episode_length", steps)
-        eval_logger.dump(step=eval_ep)
+        all_rewards.append(episode_reward)
+        all_steps.append(episode_steps)
+    
+    eval_env.close()
 
-
-    rospy.loginfo("="*50)
-    rospy.loginfo("Evaluation Summary")
-    rospy.loginfo(f"Average Reward over {num_eval_episodes} episodes: {np.mean(all_rewards):.2f} +/- {np.std(all_rewards):.2f}")
-    rospy.loginfo("="*50)
-
-    env.close()
-    rospy.loginfo("Evaluation script finished.")
+    mean_reward = np.mean(all_rewards)
+    mean_steps = np.mean(all_steps)
+    success_rate = (success_count / num_eval_episodes) * 100.0
+    
+    print("\n" + "="*50)
+    print("               Evaluation Summary")
+    print("="*50)
+    print(f"Total Episodes:   {num_eval_episodes}")
+    print(f"Successes:        {success_count} ({success_rate:.2f}%)")
+    print(f"Failures:         {failure_count} ({100 - success_rate:.2f}%)")
+    print(f"Mean Reward:      {mean_reward:.2f}")
+    print(f"Mean Steps:       {mean_steps:.2f}")
+    print("="*50 + "\n")
