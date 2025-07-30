@@ -571,7 +571,7 @@ int main(int argc, char** argv)
     // state.data = 5;
     // pose_state_pub.publish(state);
     // hoverPlacePose(group_arm);
-
+    
     state.data = 4;
     pose_state_pub.publish(state);
    {
@@ -605,7 +605,6 @@ int main(int argc, char** argv)
       performRLStep(group_arm, original_target);
       ROS_INFO("Task 5: Hover Place Pose done");
   }
-    // ros::WallDuration(1.0).sleep();
 
     // state.data = 6;
     // pose_state_pub.publish(state);

@@ -460,6 +460,7 @@ int main(int argc, char** argv)
     pose_state_pub.publish(state);
 
     hoverPose(group_arm);
+    ROS_INFO("Task 1: Hover Pose done");
 
     
     //Move above holder and down for picking object and up again
@@ -477,20 +478,21 @@ int main(int argc, char** argv)
     // ROS_WARN("pickdown start at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     pickPose(group_arm , "down");
+    ROS_INFO("Task 2: Pick Pose down done");
     // ROS_WARN("pickdown end at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     //ros::WallDuration(2.0).sleep();
 
 
-    state.data = 3;
-    pose_state_pub.publish(state);
+    // state.data = 3;
+    // pose_state_pub.publish(state);
 
-    // ROS_WARN("closehand start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    pick(group_arm);
-    // ROS_WARN("closehand end at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    //ros::WallDuration(2.0).sleep();
+    // // ROS_WARN("closehand start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // pick(group_arm);
+    // // ROS_WARN("closehand end at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // //ros::WallDuration(2.0).sleep();
 
     state.data = 4;
     pose_state_pub.publish(state);
@@ -498,6 +500,7 @@ int main(int argc, char** argv)
     // ROS_WARN("pickup start at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     pickPose(group_arm , "up");
+    ROS_INFO("Task 4: Pick Pose up done");
     // ROS_WARN("pickup end at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     //ros::WallDuration(2.0).sleep();
@@ -509,49 +512,52 @@ int main(int argc, char** argv)
     // ROS_WARN("placehover start at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     hoverPlacePose(group_arm);
+    ROS_INFO("Task 5: Hover Place Pose done");
     // ROS_WARN("placehover end at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     //ros::WallDuration(3.0).sleep();
 
-    state.data = 6;
-    pose_state_pub.publish(state);
+    // state.data = 6;
+    // pose_state_pub.publish(state);
 
-    // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    PlacePose(group_arm , "down");
-    // ROS_WARN("hover end at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    //ros::WallDuration(3.0).sleep();
+    // // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // PlacePose(group_arm , "down");
+    // // ROS_WARN("hover end at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // //ros::WallDuration(3.0).sleep();
 
-    state.data = 7;
-    pose_state_pub.publish(state);
+    // state.data = 7;
+    // pose_state_pub.publish(state);
 
-    // ROS_WARN("losehand start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    openHand(group_hand);
-    // ROS_WARN("losehand end at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    //ros::WallDuration(3.0).sleep();
+    // // ROS_WARN("losehand start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // openHand(group_hand);
+    // // ROS_WARN("losehand end at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // //ros::WallDuration(3.0).sleep();
 
 
-    group_arm.detachObject(object_to_attach.id);
+    // group_arm.detachObject(object_to_attach.id);
 
-    state.data = 8;
-    pose_state_pub.publish(state);
+    // state.data = 8;
+    // pose_state_pub.publish(state);
 
-    // Move up and to init pose
-    // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    PlacePose(group_arm , "up");
-    // ROS_WARN("Placeup end at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    //ros::WallDuration(3.0).sleep();
+    // // Move up and to init pose
+    // // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // PlacePose(group_arm , "up");
+    // // ROS_WARN("Placeup end at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // //ros::WallDuration(3.0).sleep();
+    
     state.data = 9;
     pose_state_pub.publish(state);
 
     // ROS_WARN("Gotoinit start at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     initPose(group_arm);
+    ROS_INFO("Task 9: Init Pose done");
     // ROS_WARN("Gotoinit end at:%.8f",ros::Time::now().toSec());
     // ROS_WARN("--------------------");
     state.data = 404;

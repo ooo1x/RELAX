@@ -4,13 +4,14 @@ import time
 import numpy as np
 import rospy
 
-from stable_baselines3 import DDPG
+from stable_baselines3 import TD3 # CHANGED from DDPG to TD3
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 from franka_rl_env import FrankaRLEnv
 
+# --- DIRECTORY SETUP ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "DDPG") 
+EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "TD3") # CHANGED from DDPG
 MODELS_BASE_DIR = os.path.join(EXPERIMENTS_DIR, "final_models")
 
 def find_latest_run_dir(base_dir):
@@ -24,12 +25,12 @@ def find_latest_run_dir(base_dir):
     return run_dirs[-1]
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate a trained DDPG agent for the Franka Robot.")
+    parser = argparse.ArgumentParser(description="Evaluate a trained TD3 agent for the Franka Robot.") # CHANGED description
     parser.add_argument("--run_id", type=str, default=None,
                         help="Specific run ID to load for evaluation. Defaults to the latest run.")
     args = parser.parse_args()
 
-    rospy.init_node('DDPG_evaluator', anonymous=True)
+    rospy.init_node('TD3_evaluator', anonymous=True) # CHANGED node name
 
     run_id_to_load = args.run_id if args.run_id else find_latest_run_dir(MODELS_BASE_DIR)
 
@@ -40,23 +41,26 @@ if __name__ == "__main__":
     rospy.loginfo(f"[EVAL] Using run ID: {run_id_to_load}")
 
     model_load_dir = os.path.join(MODELS_BASE_DIR, run_id_to_load)
-    model_path = os.path.join(model_load_dir, "ddpg_franka_model.zip")
+    # CHANGED model filename from 'ddpg' to 'td3'
+    model_path = os.path.join(model_load_dir, "td3_franka_model.zip")
     stats_path = os.path.join(model_load_dir, "vec_normalize_stats.pkl")
 
     if not os.path.exists(model_path) or not os.path.exists(stats_path):
         rospy.logerr(f"[EVAL] Model or stats file not found in '{model_load_dir}'.")
-        rospy.logerr("Please ensure both 'ddpg_franka_model.zip' and 'vec_normalize_stats.pkl' exist.")
+        # CHANGED error message to reflect new filename
+        rospy.logerr("Please ensure both 'td3_franka_model.zip' and 'vec_normalize_stats.pkl' exist.")
         exit()
 
     eval_env = make_vec_env(lambda: FrankaRLEnv(), n_envs=1)
     
     rospy.loginfo(f"[EVAL] Loading normalization stats from: {stats_path}")
     eval_env = VecNormalize.load(stats_path, eval_env)
+    # Set to evaluation mode
     eval_env.training = False 
     eval_env.norm_reward = False
 
     rospy.loginfo(f"[EVAL] Loading trained model from: {model_path}")
-    model = DDPG.load(model_path, env=eval_env)
+    model = TD3.load(model_path, env=eval_env) # CHANGED from DDPG.load
 
     num_eval_episodes = 50
     rospy.loginfo(f"[EVAL] Starting evaluation for {num_eval_episodes} episodes...")
@@ -74,12 +78,14 @@ if __name__ == "__main__":
         collided = False
 
         while not done and not rospy.is_shutdown():
+            # Use deterministic actions for evaluation
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, done, info = eval_env.step(action)
             
             episode_reward += reward
             episode_steps += 1
             
+            # Check for custom info from the environment
             if "collision" in info[0] and info[0]["collision"]:
                 collided = True
 
@@ -95,6 +101,7 @@ if __name__ == "__main__":
     
     eval_env.close()
 
+    # --- Print Final Summary ---
     mean_reward = np.mean(all_rewards)
     mean_steps = np.mean(all_steps)
     success_rate = (success_count / num_eval_episodes) * 100.0
@@ -104,7 +111,7 @@ if __name__ == "__main__":
     print("="*50)
     print(f"Total Episodes:   {num_eval_episodes}")
     print(f"Successes:        {success_count} ({success_rate:.2f}%)")
-    print(f"Failures:         {failure_count} ({100 - success_rate:.2f}%)")
+    print(f"Failures:         {failure_count} ({100.0 - success_rate:.2f}%)")
     print(f"Mean Reward:      {mean_reward:.2f}")
     print(f"Mean Steps:       {mean_steps:.2f}")
     print("="*50 + "\n")
