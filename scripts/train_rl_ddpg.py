@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     GAMMA = 0.99
-    MAX_CPP_EPISODES = 2  # Set the total number of episodes for the C++ node to run
+    MAX_CPP_EPISODES = 200  # Set the total number of episodes for the C++ node to run
     
     # --- Variable Initialization ---
     load_model_path = None
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     ros_tracker = RosStateTracker()
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=800,  # Save a checkpoint every 800 steps
+        save_freq=400,  # Save a checkpoint every 800 steps
         save_path=checkpoint_save_dir, 
         name_prefix="ddpg_franka",
         save_replay_buffer=True,

@@ -14,6 +14,7 @@ import threading
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
 from moveit_commander import PlanningSceneInterface
+import random
 
 class FrankaRLEnv(Env):
     def __init__(self):
@@ -76,8 +77,6 @@ class FrankaRLEnv(Env):
             
             if self.pose_state in {4, 5}: 
                 self.ready_for_rl_request = True
-            if self.pose_state == 9: 
-                self.episode_is_over = True
 
     def _move_group_result_cb(self, msg: MoveGroupActionResult):
         self.last_move_status = msg.status.status
@@ -140,18 +139,6 @@ class FrankaRLEnv(Env):
     
     def _get_observation(self):
         ee_position = np.array(self.get_ee_position(), dtype=np.float32)
-
-        # try:
-        #     dist1 = np.linalg.norm(ee_position - self.obstacle1)
-        #     dist2 = np.linalg.norm(ee_position - self.obstacle2)
-        #     dist3 = np.linalg.norm(ee_position - self.obstacle3)
-
-        #     distances_msg = Float32MultiArray()
-        #     distances_msg.data = [dist1, dist2, dist3]
-            
-        #     self.distances_pub.publish(distances_msg)
-        # except Exception as e:
-        #     rospy.logwarn_throttle(10, f"[FrankaRLEnv] Could not publish distances: {e}")
 
         if self.current_request:
             target_position = np.array([
@@ -230,6 +217,10 @@ class FrankaRLEnv(Env):
             return self._get_observation(), {}
 
     def step(self, action):
+        if self.current_episode_steps == 0:
+            rospy.logdebug("First step of episode, ensuring visited_states is cleared.")
+            self.visited_states = set()
+
         self.request_event.clear()
         while not self.request_event.wait(timeout=1.0): # Wait for 1 second
             if rospy.is_shutdown():
@@ -281,17 +272,18 @@ class FrankaRLEnv(Env):
             self.had_planning_failure = True
         
         self.current_episode_steps += 1
-        
-        REQUIRED_STATES = {1, 2, 4, 5, 9}
-        print(f"Visited states: {self.visited_states}, Required states: {REQUIRED_STATES}")
-        if self.episode_is_over:
+
+        terminated = (self.pose_state == 9)
+
+        truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
+
+        REQUIRED_STATES = {4, 5}
+        print(f"Visited states: {self.visited_states}")
+        if self.pose_state == 9:
             if REQUIRED_STATES.issubset(self.visited_states):
                 rospy.loginfo("Episode ended with full state sequence.")
                 if not self.had_planning_failure:
                     reward += 300
-
-        terminated = self.episode_is_over
-        truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
        
         info = {'collision': collision, 'planning_failed': planning_failed}
         print(f"Step: {self.current_episode_steps}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
