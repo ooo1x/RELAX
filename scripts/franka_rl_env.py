@@ -1,14 +1,12 @@
 import rospy
 import numpy as np
 from moveit_commander import MoveGroupCommander, RobotCommander, roscpp_initialize, roscpp_shutdown
-from std_msgs.msg import Float32MultiArray, Int32, Bool
+from std_msgs.msg import Float32MultiArray, Int32, Bool, Float32
 from gymnasium import Env,spaces
 import math
-from rosgraph_msgs.msg import Log
 from geometry_msgs.msg import Pose, PoseStamped
 from copy import deepcopy
 from moveit_msgs.msg import MoveGroupActionResult
-from actionlib_msgs.msg import GoalStatus
 import tf2_ros
 import threading
 from moveit_msgs.msg import CollisionObject
@@ -25,33 +23,23 @@ class FrankaRLEnv(Env):
         self.move_group = MoveGroupCommander("panda_arm")
 
         # Set obstacles and goals
-        self.obstacle1 = np.array([0.75, -0.25, 1.48])
-        self.obstacle2 = np.array([0.75,  0.25, 1.48])
-        self.obstacle3 = np.array([0.75, 0.0, 1.64])
-        self.obstacles = [self.obstacle1, self.obstacle2, self.obstacle3]
+        self.obstacle1 = np.array([0.75, -0.5, 1.48])
+        self.obstacle2 = np.array([0.75,  0.5, 1.48])
+        # self.obstacle3 = np.array([0.75, 0.0, 1.64])
+        self.obstacles = [self.obstacle1, self.obstacle2]
         self.scene = PlanningSceneInterface()
 
-        # Set state space: ee_pos(3), vec_to_target(3), vec_to_obs1-3(9), current_joint_states(7) 
-        obs_dim = 22
+        # Set state space: ee_pos(3), vec_to_obs1-3(9), current_joint_states(7), falty_joint4_value(1)
+        obs_dim = 17
         high_bounds = np.array([np.inf] * obs_dim, dtype=np.float32)
         self.observation_space = spaces.Box(low=-high_bounds, high=high_bounds, dtype=np.float32)
 
         # Set action space
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
-        self.MAX_DELTA = 0.05
-
-        # ROS communication
-        self.resolved_pose_pub = rospy.Publisher("/rl/action_resolved", Pose, queue_size=1, latch=True)
-        self.last_move_status = None
-        rospy.Subscriber('/move_group/result',MoveGroupActionResult,self._move_group_result_cb,queue_size=1)
-        #self.distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
-        rospy.Subscriber('/pose_state', Int32, self._pose_state_callback, queue_size=1)
-        self.request_sub = rospy.Subscriber('/rl/action_request', Pose, self._request_callback, queue_size=1)
-        self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
-        self.joint_states = np.zeros(7) # Panda7个关节
-        self.joint_states_sub = rospy.Subscriber('/joint_states', JointState, self._joint_states_cb, queue_size=1)
-    
+        self.action_space = spaces.Box(low=-0.5, high=0, shape=(1,), dtype=np.float32)
+        
         self.request_event = threading.Event()
+        self.step_result_event = threading.Event() 
+        self.reward_received_event = threading.Event()
 
         self.MAX_EPISODE_STEPS = 300
         self.current_episode_steps = 0
@@ -65,8 +53,32 @@ class FrankaRLEnv(Env):
         self.had_planning_failure = False
         self._add_obstacles_to_scene()
         self.visited_states = set()
+        self.faulty_start_j4 = 0.0
+        self.execution_aborted_flag = False
+        self.trajectory_reward = 0.0
 
+        # ROS communication
+        self.corrected_start_j4_pub = rospy.Publisher("/rl/corrected_start_joint4", Float32, queue_size=10)
+        self.request_sub = rospy.Subscriber('/rl/faulty_start_joint4', Float32, self._faulty_start_joint_callback, queue_size=1)
+        rospy.Subscriber('/pose_state', Int32, self._pose_state_callback, queue_size=1)
+        self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
+        self.joint_states = np.zeros(7) # Panda7个关节
+        self.joint_states_sub = rospy.Subscriber('/faulty_joint_states', JointState, self._joint_states_cb, queue_size=1)
+        rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=1)
+        rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=1)
         rospy.loginfo("FrankaRLEnv initialized successfully.")
+   
+    def _reward_callback(self, msg: Float32):
+        """接收来自C++的、基于整个轨迹计算的奖励值"""
+        self.trajectory_reward = msg.data
+        self.reward_received_event.set()
+
+    def _step_result_callback(self, msg: Bool):
+        """
+        接收来自C++的、关于上一步执行结果的回调。
+        """
+        self.step_succeeded = msg.data
+        self.step_result_event.set() # 收到结果，设置事件，让step函数可以继续
 
     def _joint_states_cb(self, msg):
         try:
@@ -82,11 +94,13 @@ class FrankaRLEnv(Env):
         except Exception as e:
             rospy.logwarn(f"Could not extract joint states: {e}")
     
-    def _request_callback(self, msg: Pose):
+    def _faulty_start_joint_callback(self, msg: Float32):
 
         if self.request_event.is_set():
-            return 
-        self.current_request = msg
+            return
+        
+        self.faulty_start_j4 = msg.data
+        
         self.request_event.set()
     
     def _pose_state_callback(self, msg):
@@ -95,6 +109,9 @@ class FrankaRLEnv(Env):
             
             if self.pose_state in {4, 5}: 
                 self.ready_for_rl_request = True
+            
+            if self.pose_state == 9:
+                self.episode_is_over = True
 
     def _move_group_result_cb(self, msg: MoveGroupActionResult):
         self.last_move_status = msg.status.status
@@ -103,12 +120,12 @@ class FrankaRLEnv(Env):
     def _add_obstacles_to_scene(self):
         #rospy.loginfo("Adding obstacles to the planning scene.")
         
-        for obs_name in ["obstacle1", "obstacle2", "obstacle3"]:
+        for obs_name in ["obstacle1", "obstacle2"]:
             self.scene.remove_world_object(obs_name)
         
         rospy.sleep(1) 
 
-        obstacle_radius = 0.2 
+        obstacle_radius = 0.05
 
         for i, obs_pos in enumerate(self.obstacles):
             obs_name = f"obstacle{i+1}"
@@ -157,87 +174,33 @@ class FrankaRLEnv(Env):
     
     def _get_observation(self):
         ee_position = np.array(self.get_ee_position(), dtype=np.float32)
-
-        if self.current_request:
-            target_position = np.array([
-                self.current_request.position.x,
-                self.current_request.position.y,
-                self.current_request.position.z
-            ], dtype=np.float32)
-        else:
-            target_position = np.zeros(3, dtype=np.float32)
         
-        vec_to_target = target_position - ee_position
         vec_to_obs1 = self.obstacle1 - ee_position
         vec_to_obs2 = self.obstacle2 - ee_position
-        vec_to_obs3 = self.obstacle3 - ee_position
-    
+        #vec_to_obs3 = self.obstacle3 - ee_position
+
         return np.concatenate([
             ee_position, 
-            vec_to_target, 
             vec_to_obs1, 
             vec_to_obs2, 
-            vec_to_obs3,
-            self.joint_states 
+            self.joint_states,
+            np.array([self.faulty_start_j4], dtype=np.float32),
         ], dtype=np.float32)
 
 
-    def _compute_reward(self, planning_failed):
-        TARGET_REWARD_WEIGHT = 50.0      
-        COLLISION_THRESHOLD = 0.20        
-        PENALTY_COLLISION = -200          
-        PENALTY_PLANNING_FAILURE = -100    
-        JOINT_ERROR_WEIGHT = 200.0 
+    def _compute_reward(self, planning_failed, cpp_provided_reward):
 
+        PENALTY_PLANNING_FAILURE = -200.0
+        
         if planning_failed:
             rospy.logwarn("Planning failed. Applying penalty.")
-            return PENALTY_PLANNING_FAILURE, False
+            return PENALTY_PLANNING_FAILURE,True
 
-        ee_position = np.array(self.get_ee_position(), dtype=np.float32)
-        target_pos_np = np.array([
-            self.current_request.position.x,
-            self.current_request.position.y,
-            self.current_request.position.z
-        ])
-
-        distance_to_target = np.linalg.norm(ee_position - target_pos_np)
-
-        if self.previous_distance_to_target is None:
-            delta_dist = 0.0
-        else:
-            delta_dist = self.previous_distance_to_target - distance_to_target
-       
-        target_reward = delta_dist * TARGET_REWARD_WEIGHT 
-
-        self.previous_distance_to_target = distance_to_target
-
-        min_dist_to_obstacle = min([np.linalg.norm(ee_position - obs_pos) for obs_pos in self.obstacles])
-    
-        if min_dist_to_obstacle < COLLISION_THRESHOLD:
-            rospy.logwarn(f"Collision detected! Distance to obstacle: {min_dist_to_obstacle:.3f} < {COLLISION_THRESHOLD}")
-            return PENALTY_COLLISION, True
+        trajectory_reward = cpp_provided_reward
         
-        joint_error_penalty = 0.0
-        try:
-            original_target_pose = deepcopy(self.current_request)
-            
-            self.move_group.set_pose_target(original_target_pose)
-            print(f"Original target pose: {original_target_pose.position.x:.3f}, {original_target_pose.position.y:.3f}, {original_target_pose.position.z:.3f}")
-            ideal_joint_values = self.move_group.get_joint_value_target()
-            print(f"Ideal joint values: {ideal_joint_values}")
-            ideal_joint_4 = ideal_joint_values[3]
-            print(f"Ideal joint 4 value: {ideal_joint_4:.3f}")
-            current_joint_4 = self.joint_states[3]
-            print(f"Current joint 4 value: {current_joint_4:.3f}")
-            error_j4 = abs(current_joint_4 - ideal_joint_4)
-            joint_error_penalty = -error_j4 * JOINT_ERROR_WEIGHT
-            
-        except Exception as e:
-            rospy.logwarn(f"Could not compute joint error penalty: {e}")
+        total_reward = trajectory_reward
 
-        total_reward = target_reward + joint_error_penalty
-        
-        return total_reward, False 
+        return total_reward, False
     
     def reset(self, *, seed=None, options=None):
             super().reset(seed=seed)
@@ -249,9 +212,10 @@ class FrankaRLEnv(Env):
             self.ready_for_rl_request = False
             self.current_episode_steps = 0
             self.current_request = None
+            self.step_result_event.clear()
+            self.reward_received_event.clear()
+            self.trajectory_reward = 0.0
             
-            self.previous_distance_to_target = None
-
             rospy.loginfo("Env Reset completed. Ready for the first step.")
 
             return self._get_observation(), {}
@@ -260,50 +224,38 @@ class FrankaRLEnv(Env):
         if self.current_episode_steps == 0:
             rospy.logdebug("First step of episode, ensuring visited_states is cleared.")
             self.visited_states = set()
-
+        
         self.request_event.clear()
         while not self.request_event.wait(timeout=1.0): # Wait for 1 second
             if rospy.is_shutdown():
                 rospy.logwarn("Shutdown signal received while waiting for request. Terminating episode.")
                 return np.zeros(self.observation_space.shape), 0.0, True, False, {}
 
-        ee_position_before_move = self.get_ee_position()
-
-        target_pos_np = np.array([
-            self.current_request.position.x,
-            self.current_request.position.y,
-            self.current_request.position.z
-        ])
-        self.previous_distance_to_target = np.linalg.norm(ee_position_before_move - target_pos_np)
-
-        self.original_target_pose = deepcopy(self.current_request) 
-
-        self.resolved_pose = deepcopy(self.original_target_pose)      
-        delta = np.clip(action, -1.0, 1.0) * self.MAX_DELTA
-        self.resolved_pose.position.x += delta[0]
-        self.resolved_pose.position.y += delta[1]
-        self.resolved_pose.position.z += delta[2]
+        correction_value = action[0]
+        if not self.faulty_start_j4:
+            rospy.logerr("Step function started but faulty_joint4_waypoints is empty!")
+            # 发生这种情况，返回惩罚并结束
+            return self._get_observation(), 0, True, False, {'error': 'no waypoints received'}
         
-        self.move_result_received = False 
-        self.last_move_status = None
-        self.resolved_pose_pub.publish(self.resolved_pose)
+        corrected_start_j4 = self.faulty_start_j4 + correction_value
+        msg_to_cpp = Float32()
+        msg_to_cpp.data = corrected_start_j4
+        self.corrected_start_j4_pub.publish(msg_to_cpp)
         # rospy.loginfo(f"Published resolved pose: {self.resolved_pose.position.x:.3f}, {self.resolved_pose.position.y:.3f}, {self.resolved_pose.position.z:.3f}")
-
-        rate = rospy.Rate(50)
-        timeout_sec = 10
-        start_time = rospy.Time.now().to_sec()
-
-        while not rospy.is_shutdown() and not self.move_result_received:
-            if rospy.Time.now().to_sec() - start_time > timeout_sec:
-                rospy.logwarn("Timeout waiting for move result!")
-                break
-            rate.sleep()
+        
+        if not self.step_result_event.wait(timeout=10.0):
+            rospy.logerr("Timeout! C++ did not return a step result in time.")
+            self.step_succeeded = False # 超时就算失败
+        
+        if not self.reward_received_event.wait(timeout=10.0):
+            rospy.logerr("Timeout! C++ did not return a reward value in time.")
+            self.trajectory_reward = 0 if not self.step_succeeded else 0.0
         
         # rospy.loginfo(f"Move result received with status: {self.last_move_status}")
 
-        planning_failed = (self.last_move_status == GoalStatus.ABORTED)
+        planning_failed = (not self.step_succeeded)
 
-        reward, collision = self._compute_reward(planning_failed) 
+        reward, collision = self._compute_reward(planning_failed, self.trajectory_reward) 
         obs = self._get_observation()
 
         if collision:
@@ -313,18 +265,17 @@ class FrankaRLEnv(Env):
         
         self.current_episode_steps += 1
 
-        terminated = (self.pose_state == 9)
+        REQUIRED_STATES = {4, 5}
+        if REQUIRED_STATES.issubset(self.visited_states):
+            if not self.had_planning_failure:
+                reward += 200
+        
+        terminated = self.episode_is_over
 
         truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
-
-        REQUIRED_STATES = {4, 5}
-        if self.pose_state == 9:
-            if REQUIRED_STATES.issubset(self.visited_states):
-                if not self.had_planning_failure:
-                    reward += 300
        
         info = {'collision': collision, 'planning_failed': planning_failed}
-        print(f"Step: {self.current_episode_steps}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
+        print(f"Step: {self.current_episode_steps}, Reward: {reward}")
 
         self.ready_pub.publish(True)
 

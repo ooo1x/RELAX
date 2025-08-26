@@ -94,17 +94,3 @@ if __name__ == "__main__":
         all_steps.append(episode_steps)
     
     eval_env.close()
-
-    mean_reward = np.mean(all_rewards)
-    mean_steps = np.mean(all_steps)
-    success_rate = (success_count / num_eval_episodes) * 100.0
-    
-    print("\n" + "="*50)
-    print("               Evaluation Summary")
-    print("="*50)
-    print(f"Total Episodes:   {num_eval_episodes}")
-    print(f"Successes:        {success_count} ({success_rate:.2f}%)")
-    print(f"Failures:         {failure_count} ({100 - success_rate:.2f}%)")
-    print(f"Mean Reward:      {mean_reward:.2f}")
-    print(f"Mean Steps:       {mean_steps:.2f}")
-    print("="*50 + "\n")
