@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     GAMMA = 0.99
-    MAX_CPP_EPISODES = 1498  # Set the total number of episodes for the C++ node to run
+    MAX_CPP_EPISODES = 998  # Set the total number of episodes for the C++ node to run
     
     # --- Variable Initialization ---
     load_model_path = None
@@ -179,7 +179,7 @@ if __name__ == "__main__":
         action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
                      gamma=GAMMA, tensorboard_log=TENSORBOARD_LOG_DIR,
-                     buffer_size=100000, learning_starts=1000)
+                     buffer_size=100000, learning_starts=800)
 
     # --- Setup Callbacks ---
     ros_tracker = RosStateTracker()

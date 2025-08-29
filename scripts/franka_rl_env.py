@@ -20,28 +20,28 @@ class FrankaRLEnv(Env):
         super(FrankaRLEnv, self).__init__()
         roscpp_initialize([])
         rospy.loginfo("Initializing FrankaRLEnv...")
-        self.move_group = MoveGroupCommander("panda_arm")
+        self.move_group = MoveGroupCommander("panda_manipulator")
 
         # Set obstacles and goals
-        self.obstacle1 = np.array([0.75, -0.5, 1.48])
-        self.obstacle2 = np.array([0.75,  0.5, 1.48])
-        # self.obstacle3 = np.array([0.75, 0.0, 1.64])
-        self.obstacles = [self.obstacle1, self.obstacle2]
+        self.obstacle1 = np.array([0.75, -0.35, 1.2])
+        self.obstacle2 = np.array([0.75,  0.25, 1.2])
+        self.obstacle3 = np.array([0.75, 0.0, 1.64])
+        self.obstacles = [self.obstacle1, self.obstacle2,self.obstacle3]
         self.scene = PlanningSceneInterface()
 
-        # Set state space: ee_pos(3), vec_to_obs1-3(9), current_joint_states(7), falty_joint4_value(1)
-        obs_dim = 17
+        # Set state space: current_joint_states(7), falty_joint4_value(1)
+        obs_dim = 8
         high_bounds = np.array([np.inf] * obs_dim, dtype=np.float32)
         self.observation_space = spaces.Box(low=-high_bounds, high=high_bounds, dtype=np.float32)
 
         # Set action space
-        self.action_space = spaces.Box(low=-0.5, high=0, shape=(1,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
         
         self.request_event = threading.Event()
         self.step_result_event = threading.Event() 
         self.reward_received_event = threading.Event()
 
-        self.MAX_EPISODE_STEPS = 300
+        self.max_episode_steps = 300
         self.current_episode_steps = 0
         self.current_request = None
         self.previous_distance_to_target = None
@@ -64,8 +64,8 @@ class FrankaRLEnv(Env):
         self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
         self.joint_states = np.zeros(7) # Panda7个关节
         self.joint_states_sub = rospy.Subscriber('/faulty_joint_states', JointState, self._joint_states_cb, queue_size=1)
-        rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=1)
-        rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=1)
+        rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=10)
+        rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=10)
         rospy.loginfo("FrankaRLEnv initialized successfully.")
    
     def _reward_callback(self, msg: Float32):
@@ -94,13 +94,8 @@ class FrankaRLEnv(Env):
         except Exception as e:
             rospy.logwarn(f"Could not extract joint states: {e}")
     
-    def _faulty_start_joint_callback(self, msg: Float32):
-
-        if self.request_event.is_set():
-            return
-        
+    def _faulty_start_joint_callback(self, msg: Float32):   
         self.faulty_start_j4 = msg.data
-        
         self.request_event.set()
     
     def _pose_state_callback(self, msg):
@@ -120,12 +115,12 @@ class FrankaRLEnv(Env):
     def _add_obstacles_to_scene(self):
         #rospy.loginfo("Adding obstacles to the planning scene.")
         
-        for obs_name in ["obstacle1", "obstacle2"]:
+        for obs_name in ["obstacle1", "obstacle2", "obstacle3"]:
             self.scene.remove_world_object(obs_name)
         
         rospy.sleep(1) 
 
-        obstacle_radius = 0.05
+        obstacle_radius = 0.2
 
         for i, obs_pos in enumerate(self.obstacles):
             obs_name = f"obstacle{i+1}"
@@ -177,12 +172,9 @@ class FrankaRLEnv(Env):
         
         vec_to_obs1 = self.obstacle1 - ee_position
         vec_to_obs2 = self.obstacle2 - ee_position
-        #vec_to_obs3 = self.obstacle3 - ee_position
+        vec_to_obs3 = self.obstacle3 - ee_position
 
         return np.concatenate([
-            ee_position, 
-            vec_to_obs1, 
-            vec_to_obs2, 
             self.joint_states,
             np.array([self.faulty_start_j4], dtype=np.float32),
         ], dtype=np.float32)
@@ -226,6 +218,9 @@ class FrankaRLEnv(Env):
             self.visited_states = set()
         
         self.request_event.clear()
+        self.step_result_event.clear()
+        self.reward_received_event.clear()
+
         while not self.request_event.wait(timeout=1.0): # Wait for 1 second
             if rospy.is_shutdown():
                 rospy.logwarn("Shutdown signal received while waiting for request. Terminating episode.")
@@ -272,7 +267,7 @@ class FrankaRLEnv(Env):
         
         terminated = self.episode_is_over
 
-        truncated = self.current_episode_steps >= self.MAX_EPISODE_STEPS
+        truncated = self.current_episode_steps >= self.max_episode_steps
        
         info = {'collision': collision, 'planning_failed': planning_failed}
         print(f"Step: {self.current_episode_steps}, Reward: {reward}")

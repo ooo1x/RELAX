@@ -73,8 +73,8 @@ if __name__ == '__main__':
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
     obstacles = [
-        np.array([0.75, -0.25, 1.48]),
-        np.array([0.75,  0.25, 1.48]),
+        np.array([0.75, -0.25, 1.2]),
+        np.array([0.75,  0.25, 1.2]),
         np.array([0.75,  0.0,  1.64])
     ]
    
