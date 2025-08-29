@@ -44,9 +44,9 @@ ros::Publisher g_joint_trajectory_command_pub;
 ros::Publisher g_reward_pub;
 
 std::vector<Eigen::Vector3d> g_obstacles = {
-    Eigen::Vector3d(0.75, -0.5, 1.48),
-    Eigen::Vector3d(0.75, 0.5, 1.48),
-    // Eigen::Vector3d(0.75, 0.0, 1.64)
+    Eigen::Vector3d(0.75, -0.35, 1.2),
+    Eigen::Vector3d(0.75, 0.25, 1.2),
+    Eigen::Vector3d(0.75, 0.0, 1.64)
 };
 const double COLLISION_THRESHOLD = 0.20;
 
@@ -54,47 +54,8 @@ void correctedStartJointCallback(const std_msgs::Float32::ConstPtr& msg)
 {
     g_corrected_start_j4 = msg->data;
     g_corrected_j4_received = true;
-    ROS_INFO("Received corrected start J4 value from RL: %f", g_corrected_start_j4);
+    //ROS_INFO("Received corrected start J4 value from RL: %f", g_corrected_start_j4);
 }
-
-// // createStitchedTrajectory 函数，它现在使用真实的状态作为起点
-// moveit_msgs::RobotTrajectory createStitchedTrajectory(
-//     const moveit::planning_interface::MoveGroupInterface::Plan& original_plan,
-//     moveit::planning_interface::MoveGroupInterface& move_group,
-//     const std::vector<double>& start_joints)
-// {
-//     ROS_INFO("[Stitcher] Creating a new stitched trajectory...");
-
-//     moveit::core::RobotState start_state(move_group.getRobotModel());
-//     start_state.setJointGroupPositions(move_group.getName(), start_joints);
-    
-//     robot_trajectory::RobotTrajectory stitched_trajectory(start_state.getRobotModel(), move_group.getName());
-//     stitched_trajectory.addSuffixWayPoint(start_state, 0.0);
-    
-//     double original_duration = 0.0;
-//     for (const auto& original_point : original_plan.trajectory_.joint_trajectory.points)
-//     {
-//         if (original_point.positions.empty()) continue;
-//         moveit::core::RobotState temp_state(start_state.getRobotModel());
-//         temp_state.setJointGroupPositions(move_group.getName(), original_point.positions);
-//         original_duration = original_point.time_from_start.toSec();
-//         stitched_trajectory.addSuffixWayPoint(temp_state, original_duration);
-//     }
-    
-//     trajectory_processing::IterativeParabolicTimeParameterization iptp;
-//     bool success = iptp.computeTimeStamps(stitched_trajectory, 1.0, 1.0);
-//     if (!success)
-//     {
-//         ROS_ERROR("[Stitcher] Failed to re-time the stitched trajectory!");
-//         return moveit_msgs::RobotTrajectory();
-//     }
-
-//     moveit_msgs::RobotTrajectory stitched_trajectory_msg;
-//     stitched_trajectory.getRobotTrajectoryMsg(stitched_trajectory_msg);
-
-//     ROS_INFO("[Stitcher] Stitched trajectory created with %zu points.", stitched_trajectory_msg.joint_trajectory.points.size());
-//     return stitched_trajectory_msg;
-// }
 
 void faultyJointStatesCallback(const sensor_msgs::JointState::ConstPtr& msg)
 {
@@ -120,48 +81,57 @@ void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
     }
 }
 
-float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory, const moveit::core::RobotModelConstPtr& robot_model)
+float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
+                              const moveit::core::RobotModelConstPtr& robot_model,
+                              const std::vector<double>& start_joints,
+                              const geometry_msgs::Pose& target_pose)
 {
-    float total_reward = 0.0;
-    const double MIN_DIST_REWARD_WEIGHT = 50.0;
-    const double CLOSE_DIST_PENALTY = -100.0;
-    const double DIST_THRESHOLD = 0.2;
-    
-    if (trajectory.joint_trajectory.points.empty()) {
+    const float TARGET_REWARD_WEIGHT = 100.0f;
+    const double COLLISION_THRESHOLD = 0.20;
+    const float PENALTY_COLLISION = -200.0f;
+    const float successfully_reward = 200.0f;
+
+    if (trajectory.joint_trajectory.points.empty())
+    {
         ROS_WARN("Planned trajectory is empty, reward is 0.");
-        return 0.0;
+        return 0.0f;
     }
     
     moveit::core::RobotState robot_state(robot_model);
-    
-    for (const auto& point : trajectory.joint_trajectory.points) {
+    for (const auto& point : trajectory.joint_trajectory.points)
+    {
         if (point.positions.empty()) continue;
-        
+
         robot_state.setJointGroupPositions("panda_manipulator", point.positions);
-        
         const Eigen::Isometry3d& ee_pose = robot_state.getGlobalLinkTransform("panda_hand_tcp");
         Eigen::Vector3d ee_position = ee_pose.translation();
-        
-        double min_dist_to_obstacle = std::numeric_limits<double>::max();
-        for (const auto& obs_pos : g_obstacles) {
+
+        for (const auto& obs_pos : g_obstacles)
+        {
             double dist = (ee_position - obs_pos).norm();
-            if (dist < min_dist_to_obstacle) {
-                min_dist_to_obstacle = dist;
+            if (dist <= COLLISION_THRESHOLD)
+            {
+                ROS_WARN("Trajectory failed safety check. Applying collision penalty.");
+                return PENALTY_COLLISION;
             }
         }
-        
-        double dist_reward = 0.0;
-        if (min_dist_to_obstacle > DIST_THRESHOLD) {
-            dist_reward = MIN_DIST_REWARD_WEIGHT * (min_dist_to_obstacle - DIST_THRESHOLD);
-        } else {
-            dist_reward = CLOSE_DIST_PENALTY;
-        }
-        
-        total_reward += dist_reward;
     }
-    
-    ROS_INFO("Computed total reward from planned trajectory: %f", total_reward);
-    return total_reward;
+
+    ROS_INFO("Trajectory passed safety check. Calculating target reward.");
+
+    moveit::core::RobotState start_state(robot_model);
+    start_state.setJointGroupPositions("panda_manipulator", start_joints);
+    const Eigen::Isometry3d& start_ee_pose = start_state.getGlobalLinkTransform("panda_hand_tcp");
+    Eigen::Vector3d start_ee_position = start_ee_pose.translation();
+
+    Eigen::Vector3d target_position(target_pose.position.x, target_pose.position.y, target_pose.position.z);
+
+    double initial_distance_to_target = (start_ee_position - target_position).norm();
+
+    float target_reward = initial_distance_to_target * TARGET_REWARD_WEIGHT;
+    float total_reward = target_reward+successfully_reward;
+
+    return target_reward;
 }
 
 bool createManualPlan(const std::vector<double>& start_joints,
@@ -170,7 +140,7 @@ bool createManualPlan(const std::vector<double>& start_joints,
                       moveit::planning_interface::MoveGroupInterface& move_group,
                       double duration_sec = 2.0)
 {
-    ROS_INFO("[ManualPlan] Creating plan from start to end...");
+    // ROS_INFO("[ManualPlan] Creating plan from start to end...");
     moveit::core::RobotState start_state(move_group.getRobotModel());
     start_state.setJointGroupPositions(move_group.getName(), start_joints);
     
@@ -214,7 +184,7 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     }
     double faulty_start_j4 = initial_plan.trajectory_.joint_trajectory.points.front().positions[3];
     std::vector<double> final_joints = initial_plan.trajectory_.joint_trajectory.points.back().positions;
-    ROS_INFO("[RLStep] Initial planned faulty joint4: %f", faulty_start_j4);
+    // ROS_INFO("[RLStep] Initial planned faulty joint4: %f", faulty_start_j4);
     
 
     // 步骤2: 与Python交互获取修正值
@@ -234,40 +204,40 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
         }
     }
 
-    // 步骤3: 执行修正动作
+    // // 步骤3: 执行修正动作
     std::vector<double> current_joints = move_group.getCurrentJointValues();
     std::vector<double> corrected_joints = current_joints;
-    int joint4_index = -1;
-    const auto& joint_names = move_group.getJointNames();
-    for(size_t i = 0; i < joint_names.size(); ++i) {
-        if(joint_names[i] == "panda_joint4") {
-            joint4_index = i;
-            break;
-        }
-    }
-    if (joint4_index != -1) {
-        corrected_joints[joint4_index] = g_corrected_start_j4;
-    } else {
-        ROS_ERROR("[RLStep] Could not find panda_joint4 index!");
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -0; g_reward_pub.publish(reward_msg);
-        return false;
-    }
+    // int joint4_index = -1;
+    // const auto& joint_names = move_group.getJointNames();
+    // for(size_t i = 0; i < joint_names.size(); ++i) {
+    //     if(joint_names[i] == "panda_joint4") {
+    //         joint4_index = i;
+    //         break;
+    //     }
+    // }
+    // if (joint4_index != -1) {
+    //     corrected_joints[joint4_index] = g_corrected_start_j4;
+    // } else {
+    //     ROS_ERROR("[RLStep] Could not find panda_joint4 index!");
+    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+    //     std_msgs::Float32 reward_msg; reward_msg.data = -0; g_reward_pub.publish(reward_msg);
+    //     return false;
+    // }
 
-    moveit::planning_interface::MoveGroupInterface::Plan correction_plan;
-    if (!createManualPlan(current_joints, corrected_joints, correction_plan, move_group, 1.0)) {
-        ROS_ERROR("[RLStep] Failed to create manual plan for correction move!");
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
-        return false;
-    }
-    if (move_group.execute(correction_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-        ROS_ERROR("[RLStep] Failed to execute the correction move!");
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -500.0; g_reward_pub.publish(reward_msg);
-        return false;
-    }
-    ROS_INFO("[RLStep] Correction move completed. Ready for final motion.");
+    // moveit::planning_interface::MoveGroupInterface::Plan correction_plan;
+    // if (!createManualPlan(current_joints, corrected_joints, correction_plan, move_group, 1.0)) {
+    //     ROS_ERROR("[RLStep] Failed to create manual plan for correction move!");
+    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+    //     std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
+    //     return false;
+    // }
+    // if (move_group.execute(correction_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    //     ROS_ERROR("[RLStep] Failed to execute the correction move!");
+    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+    //     std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
+    //     return false;
+    // }
+    // // ("[RLStep] Correction move completed. Ready for final motion.");
     
     // 步骤4: 主轨迹动作 - 手动插补并执行到 final_target_pose
     moveit::planning_interface::MoveGroupInterface::Plan final_plan;
@@ -279,27 +249,31 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     }
     
     // 步骤 5: 计算并发送奖励
-    float trajectory_reward = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel());
-    std_msgs::Float32 reward_msg;
-    reward_msg.data = trajectory_reward;
-    g_reward_pub.publish(reward_msg);
-    
-    // 步骤 6: 执行最终规划
-     ROS_INFO("--- Final Trajectory Details ---");
-    if (final_plan.trajectory_.joint_trajectory.points.size() > 1) {
-        ROS_INFO("Final Traj Start J4: %f", final_plan.trajectory_.joint_trajectory.points.front().positions[joint4_index]);
-        ROS_INFO("Final Traj End J4:   %f", final_plan.trajectory_.joint_trajectory.points.back().positions[joint4_index]);
-    }
-    ROS_INFO("--------------------------------");
-    
     moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
     
+    // 准备结果消息
     std_msgs::Bool result_msg;
     result_msg.data = (result == moveit::core::MoveItErrorCode::SUCCESS);
+
+    // 准备奖励消息
+    std_msgs::Float32 reward_msg;
+    if (result_msg.data) {
+        // 只有在执行成功时才计算奖励
+        reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
+        ROS_INFO("[RLStep] Execution successful. Calculated reward: %f", reward_msg.data);
+    } else {
+        // 如果执行失败，奖励直接设为0
+        reward_msg.data = 0.0;
+        ROS_WARN("[RLStep] Execution failed. Setting reward to 0.");
+    }
+
+    // 将奖励和结果连续发布，大大减少被干扰的可能
+    g_reward_pub.publish(reward_msg);
     g_step_result_pub.publish(result_msg);
-    ros::Duration(0.1).sleep();
+
+    ros::Duration(0.1).sleep(); // 短暂延时确保消息发出
     return result_msg.data;
-}
+    }
 
 void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
 { 
@@ -663,11 +637,10 @@ int main(int argc, char** argv)
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
   ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
-  g_step_result_pub = nh.advertise<std_msgs::Bool>("/rl/step_result", 1, true);
+  g_step_result_pub = nh.advertise<std_msgs::Bool>("/rl/step_result", 10);
   g_joint_trajectory_command_pub = nh.advertise<trajectory_msgs::JointTrajectory>("/panda_arm_controller/command", 1);
   ros::Subscriber faulty_joint_states_sub = nh.subscribe<sensor_msgs::JointState>("/faulty_joint_states", 10, faultyJointStatesCallback);
-  g_reward_pub = nh.advertise<std_msgs::Float32>("/rl/trajectory_reward", 1, true); // 新增的奖励发布者
-
+  g_reward_pub = nh.advertise<std_msgs::Float32>("/rl/trajectory_reward", 10); 
   ROS_INFO(" Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
@@ -690,7 +663,7 @@ int main(int argc, char** argv)
   group_arm.setNumPlanningAttempts(2);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 1500 ;i = i + 1)
+  for (int i = 1; i < 1000 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -748,6 +721,9 @@ int main(int argc, char** argv)
     pickPose(group_arm , "down");
     ROS_INFO("Task 2: Pick Pose done");
 
+    // geometry_msgs::Pose state2_pose = group_arm.getCurrentPose().pose;
+    // ROS_INFO("Saved return position after Task 2.");
+
     // state.data = 2;
     // pose_state_pub.publish(state);
     // {
@@ -771,29 +747,37 @@ int main(int argc, char** argv)
     // pose_state_pub.publish(state);
     // hoverPlacePose(group_arm);
     
-    state.data = 4;
-    pose_state_pub.publish(state);
-   {
-    geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-    original_target.position.z += 0.26; 
-    performRLStep(group_arm, original_target);
-    ROS_INFO("Task 4: Lift up done");
-    }
-    //ros::WallDuration(2.0).sleep();
+    // for (int j = 0; j < 6; j++)
+    // {
+      state.data = 4;
+      pose_state_pub.publish(state);
+      {
+        geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+        original_target.position.z += 0.26; 
+        performRLStep(group_arm, original_target);
+        ROS_INFO("Task 4: Lift up done");
+        }
 
-    state.data = 5;
-    pose_state_pub.publish(state);
-    {
-      geometry_msgs::Pose original_target;
-      tf2::Quaternion orientation;
-      orientation.setRPY(-tau/2, 0, -tau/8);
-      original_target.orientation = tf2::toMsg(orientation);
-      original_target.position.x = 0.502; 
-      original_target.position.y = 0.2;
-      original_target.position.z = 1.5;
-      performRLStep(group_arm, original_target);
-      ROS_INFO("Task 5: Hover Place Pose done");
-  }
+      state.data = 5;
+      pose_state_pub.publish(state);
+      {
+        geometry_msgs::Pose original_target;
+        tf2::Quaternion orientation;
+        orientation.setRPY(-tau/2, 0, -tau/8);
+        original_target.orientation = tf2::toMsg(orientation);
+        original_target.position.x = 0.502; 
+        original_target.position.y = 0.2;
+        original_target.position.z = 1.5;
+        performRLStep(group_arm, original_target);
+        ROS_INFO("Task 5: Hover Place Pose done");
+     }
+
+    //   ROS_INFO("Returning to state 2 position...");
+    //   group_arm.setPoseTarget(state2_pose);
+    //   group_arm.move();
+    //   ROS_INFO("Returned to state 2 position successfully.");
+      
+    // }
 
     // state.data = 6;
     // pose_state_pub.publish(state);
