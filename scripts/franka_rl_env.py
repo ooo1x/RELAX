@@ -29,14 +29,19 @@ class FrankaRLEnv(Env):
         self.obstacles = [self.obstacle1, self.obstacle2,self.obstacle3]
         self.scene = PlanningSceneInterface()
 
-        # Set state space: current_joint_states(7), falty_joint4_value(1)
-        obs_dim = 8
+        self.faulty_indicator = np.array([0,0,0,1,0,0,0], dtype=np.float32)  
+
+        # Set state space: current_joint_states(7)
+        obs_dim = 7
         high_bounds = np.array([np.inf] * obs_dim, dtype=np.float32)
         self.observation_space = spaces.Box(low=-high_bounds, high=high_bounds, dtype=np.float32)
 
         # Set action space
-        self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
-        
+        #把 action_space 设为 7 维（每个关节的绝对目标值）：
+        self.joint_lower = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973], dtype=np.float32)
+        self.joint_upper = np.array([ 2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973], dtype=np.float32)
+        self.action_space = spaces.Box(low=self.joint_lower, high=self.joint_upper, dtype=np.float32)
+
         self.request_event = threading.Event()
         self.step_result_event = threading.Event() 
         self.reward_received_event = threading.Event()
@@ -58,14 +63,13 @@ class FrankaRLEnv(Env):
         self.trajectory_reward = 0.0
 
         # ROS communication
-        self.corrected_start_j4_pub = rospy.Publisher("/rl/corrected_start_joint4", Float32, queue_size=10)
-        self.request_sub = rospy.Subscriber('/rl/faulty_start_joint4', Float32, self._faulty_start_joint_callback, queue_size=1)
-        rospy.Subscriber('/pose_state', Int32, self._pose_state_callback, queue_size=1)
+        self.corrected_start_pub = rospy.Publisher("/rl/corrected_start_joints", Float32MultiArray, queue_size=10)
         self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
         self.joint_states = np.zeros(7) # Panda7个关节
-        self.joint_states_sub = rospy.Subscriber('/faulty_joint_states', JointState, self._joint_states_cb, queue_size=1)
+        rospy.Subscriber('/rl/faulty_joint_states', Float32MultiArray, self._faulty_joints_callback, queue_size=1)
         rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=10)
         rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=10)
+        rospy.Subscriber('pose_state', Int32, self._pose_state_callback, queue_size=10)
         rospy.loginfo("FrankaRLEnv initialized successfully.")
    
     def _reward_callback(self, msg: Float32):
@@ -78,25 +82,14 @@ class FrankaRLEnv(Env):
         接收来自C++的、关于上一步执行结果的回调。
         """
         self.step_succeeded = msg.data
-        self.step_result_event.set() # 收到结果，设置事件，让step函数可以继续
-
-    def _joint_states_cb(self, msg):
-        try:
-            arm_joint_names = [f'panda_joint{i+1}' for i in range(7)]
-            joint_positions = []
-            for name in arm_joint_names:
-                if name in msg.name:
-                    idx = msg.name.index(name)
-                    joint_positions.append(msg.position[idx])
-            
-            if len(joint_positions) == 7:
-                self.joint_states = np.array(joint_positions, dtype=np.float32)
-        except Exception as e:
-            rospy.logwarn(f"Could not extract joint states: {e}")
+        self.step_result_event.set() 
     
-    def _faulty_start_joint_callback(self, msg: Float32):   
-        self.faulty_start_j4 = msg.data
-        self.request_event.set()
+    def _faulty_joints_callback(self, msg: Float32MultiArray):
+        if len(msg.data) == 7:
+            self.joint_states = np.array(msg.data, dtype=np.float32)
+            self.request_event.set()
+        else:
+            rospy.logwarn(f"Received joint states with unexpected length: {len(msg.data)}")
     
     def _pose_state_callback(self, msg):
             self.pose_state = msg.data
@@ -176,7 +169,6 @@ class FrankaRLEnv(Env):
 
         return np.concatenate([
             self.joint_states,
-            np.array([self.faulty_start_j4], dtype=np.float32),
         ], dtype=np.float32)
 
 
@@ -226,21 +218,21 @@ class FrankaRLEnv(Env):
                 rospy.logwarn("Shutdown signal received while waiting for request. Terminating episode.")
                 return np.zeros(self.observation_space.shape), 0.0, True, False, {}
 
-        correction_value = action[0]
-        if not self.faulty_start_j4:
-            rospy.logerr("Step function started but faulty_joint4_waypoints is empty!")
-            # 发生这种情况，返回惩罚并结束
-            return self._get_observation(), 0, True, False, {'error': 'no waypoints received'}
-        
-        corrected_start_j4 = self.faulty_start_j4 + correction_value
-        msg_to_cpp = Float32()
-        msg_to_cpp.data = corrected_start_j4
-        self.corrected_start_j4_pub.publish(msg_to_cpp)
-        # rospy.loginfo(f"Published resolved pose: {self.resolved_pose.position.x:.3f}, {self.resolved_pose.position.y:.3f}, {self.resolved_pose.position.z:.3f}")
-        
+        action = np.asarray(action, dtype=np.float32)
+        action = np.clip(action, self.joint_lower, self.joint_upper)
+
+        mask = self.faulty_indicator.astype(bool)
+        corrected = self.joint_states.copy()
+        corrected[mask] = action[mask]
+
+        corrected = np.clip(corrected, self.joint_lower, self.joint_upper)
+
+        msg = Float32MultiArray(data=corrected.tolist())
+        self.corrected_start_pub.publish(msg)
+                
         if not self.step_result_event.wait(timeout=10.0):
             rospy.logerr("Timeout! C++ did not return a step result in time.")
-            self.step_succeeded = False # 超时就算失败
+            self.step_succeeded = False 
         
         if not self.reward_received_event.wait(timeout=10.0):
             rospy.logerr("Timeout! C++ did not return a reward value in time.")

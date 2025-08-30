@@ -33,15 +33,31 @@ const double tau = 2 * M_PI;
 
 bool g_python_is_ready = false;
 bool g_is_recording = false; 
-ros::Publisher g_faulty_start_j4_pub;      // 发布有问题的 joint4 值给RL
-double g_corrected_start_j4 = 0.0;         // 存储RL返回的修正值
-bool g_corrected_j4_received = false;      // 标志位，表示已接收到修正值
 ros::Publisher g_step_result_pub;          // 发布执行成功/失败结果给RL
 ros::Publisher g_pose_state_pub;           // 发布机器人的当前位姿状态
-double g_current_panda_joint4 = 0.0;
+double g_current_panda_joints = 0.0;
 std::vector<sensor_msgs::JointState> g_recorded_joint_states;
 ros::Publisher g_joint_trajectory_command_pub;
 ros::Publisher g_reward_pub;
+
+ros::Publisher g_faulty_joints_pub;         // 发布“有问题的”规划起始关节状态给RL
+std::vector<double> g_corrected_joints;     // 用于存储完整的7个修正后的关节值
+bool g_corrected_joints_received = false; // 标志位
+
+// 接收完整的7个关节值
+void correctedJointsCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
+{
+  // 检查收到的数据是否包含7个元素
+  if (msg->data.size() == 7)
+  {
+    g_corrected_joints.assign(msg->data.begin(), msg->data.end());
+    g_corrected_joints_received = true;
+  }
+  else
+  {
+ROS_WARN("Received array with incorrect size (was %zu), message ignored.", msg->data.size());
+}
+}
 
 std::vector<Eigen::Vector3d> g_obstacles = {
     Eigen::Vector3d(0.75, -0.35, 1.2),
@@ -49,29 +65,6 @@ std::vector<Eigen::Vector3d> g_obstacles = {
     Eigen::Vector3d(0.75, 0.0, 1.64)
 };
 const double COLLISION_THRESHOLD = 0.20;
-
-void correctedStartJointCallback(const std_msgs::Float32::ConstPtr& msg)
-{
-    g_corrected_start_j4 = msg->data;
-    g_corrected_j4_received = true;
-    //ROS_INFO("Received corrected start J4 value from RL: %f", g_corrected_start_j4);
-}
-
-void faultyJointStatesCallback(const sensor_msgs::JointState::ConstPtr& msg)
-{
-    // 更新当前的joint4值
-    for (size_t i = 0; i < msg->name.size(); ++i) {
-        if (msg->name[i] == "panda_joint4") {
-            g_current_panda_joint4 = msg->position[i];
-            break; 
-        }
-    }
-    
-    // 把当前收到的这帧数据存起来
-    if (g_is_recording) {
-        g_recorded_joint_states.push_back(*msg);
-    }
-}
 
 void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
 {
@@ -87,9 +80,8 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
                               const geometry_msgs::Pose& target_pose)
 {
     const float TARGET_REWARD_WEIGHT = 100.0f;
-    const double COLLISION_THRESHOLD = 0.20;
     const float PENALTY_COLLISION = -200.0f;
-    const float successfully_reward = 200.0f;
+    const float SUCCESSFULLY_REWARD = 200.0f;
 
     if (trajectory.joint_trajectory.points.empty())
     {
@@ -127,9 +119,8 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
     Eigen::Vector3d target_position(target_pose.position.x, target_pose.position.y, target_pose.position.z);
 
     double initial_distance_to_target = (start_ee_position - target_position).norm();
-
     float target_reward = initial_distance_to_target * TARGET_REWARD_WEIGHT;
-    float total_reward = target_reward+successfully_reward;
+    float total_reward = target_reward + SUCCESSFULLY_REWARD;
 
     return target_reward;
 }
@@ -163,117 +154,104 @@ bool createManualPlan(const std::vector<double>& start_joints,
 
 bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, const geometry_msgs::Pose& final_target_pose)
 {
-    g_corrected_j4_received = false;
-    
-    // 步骤1: 规划一次以获取 faulty_start_j4
+    g_corrected_joints_received = false;
+
+    // 步骤 1: 规划一次路径，以获取初始的、“有问题的”关节状态
     move_group.setStartStateToCurrentState();
     moveit::planning_interface::MoveGroupInterface::Plan initial_plan;
     move_group.setPoseTarget(final_target_pose);
+
     if (move_group.plan(initial_plan) != moveit::core::MoveItErrorCode::SUCCESS)
     {
-        ROS_ERROR("[RLStep] Initial planning to trigger RL failed!");
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = -200.0f; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
         return false;
     }
-    if (initial_plan.trajectory_.joint_trajectory.points.empty()) {
-        ROS_ERROR("[RLStep] Initial plan is empty, cannot extract starting joint4.");
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
-        return false;
-    }
-    double faulty_start_j4 = initial_plan.trajectory_.joint_trajectory.points.front().positions[3];
-    std::vector<double> final_joints = initial_plan.trajectory_.joint_trajectory.points.back().positions;
-    // ROS_INFO("[RLStep] Initial planned faulty joint4: %f", faulty_start_j4);
-    
 
-    // 步骤2: 与Python交互获取修正值
-    std_msgs::Float32 msg_to_rl; msg_to_rl.data = faulty_start_j4;
+    if (initial_plan.trajectory_.joint_trajectory.points.empty()) {
+        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = -200.0f; g_reward_pub.publish(reward_msg);
+        return false;
+    }
+
+    // MoveIt规划出的完整起始关节状态数组
+    std::vector<double> faulty_start_joints = initial_plan.trajectory_.joint_trajectory.points.front().positions;
+    std::vector<double> final_joints = initial_plan.trajectory_.joint_trajectory.points.back().positions;
+
+    {
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(4);
+        ss << "[";
+        for (size_t i = 0; i < faulty_start_joints.size(); ++i) {
+            ss << faulty_start_joints[i] << (i < faulty_start_joints.size() - 1 ? ", " : "");
+        }
+        ss << "]";
+        ROS_INFO_STREAM("[RLStep] faulty_joints: " << ss.str());
+    }
+
+    // 步骤 2: 将“有问题的”关节值发送给Python，并等待修正动作
+    std_msgs::Float32MultiArray msg_to_rl;
+    for (const auto& joint_value : faulty_start_joints)
+    {
+        msg_to_rl.data.push_back(static_cast<float>(joint_value));
+    }
+    
     ros::Rate r(10);
     ros::Time start_time = ros::Time::now();
-    while(ros::ok() && !g_corrected_j4_received)
+    while(ros::ok() && !g_corrected_joints_received)
     {
-        g_faulty_start_j4_pub.publish(msg_to_rl);
+        g_faulty_joints_pub.publish(msg_to_rl);
         ros::spinOnce();
         r.sleep();
         if ((ros::Time::now() - start_time).toSec() > 5.0) {
-            ROS_ERROR("[RLStep] Timeout waiting for RL correction!");
             std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
             std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
             return false;
         }
     }
 
-    // // 步骤3: 执行修正动作
-    std::vector<double> current_joints = move_group.getCurrentJointValues();
-    std::vector<double> corrected_joints = current_joints;
-    // int joint4_index = -1;
-    // const auto& joint_names = move_group.getJointNames();
-    // for(size_t i = 0; i < joint_names.size(); ++i) {
-    //     if(joint_names[i] == "panda_joint4") {
-    //         joint4_index = i;
-    //         break;
-    //     }
-    // }
-    // if (joint4_index != -1) {
-    //     corrected_joints[joint4_index] = g_corrected_start_j4;
-    // } else {
-    //     ROS_ERROR("[RLStep] Could not find panda_joint4 index!");
-    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-    //     std_msgs::Float32 reward_msg; reward_msg.data = -0; g_reward_pub.publish(reward_msg);
-    //     return false;
-    // }
-
-    // moveit::planning_interface::MoveGroupInterface::Plan correction_plan;
-    // if (!createManualPlan(current_joints, corrected_joints, correction_plan, move_group, 1.0)) {
-    //     ROS_ERROR("[RLStep] Failed to create manual plan for correction move!");
-    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-    //     std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
-    //     return false;
-    // }
-    // if (move_group.execute(correction_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-    //     ROS_ERROR("[RLStep] Failed to execute the correction move!");
-    //     std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-    //     std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
-    //     return false;
-    // }
-    // // ("[RLStep] Correction move completed. Ready for final motion.");
+    // 步骤 3: 直接应用从RL接收到的修正 
+    std::vector<double> corrected_joints = g_corrected_joints;
+    {
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(4);
+        ss << "[";
+        for (size_t i = 0; i < corrected_joints.size(); ++i) {
+            ss << corrected_joints[i] << (i < corrected_joints.size() - 1 ? ", " : "");
+        }
+        ss << "]";
+        ROS_INFO_STREAM("[RL step]  corrected_joints: " << ss.str());
+    }
     
-    // 步骤4: 主轨迹动作 - 手动插补并执行到 final_target_pose
+    // 步骤 4: 创建一个从修正后的起始状态到最终目标的新规划
     moveit::planning_interface::MoveGroupInterface::Plan final_plan;
     if (!createManualPlan(corrected_joints, final_joints, final_plan, move_group, 2.0)) {
-        ROS_ERROR("[RLStep] Failed to create manual plan for final move!");
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
         std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
         return false;
     }
-    
-    // 步骤 5: 计算并发送奖励
+
+    // 步骤 5: 执行规划并计算奖励
     moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
     
-    // 准备结果消息
     std_msgs::Bool result_msg;
     result_msg.data = (result == moveit::core::MoveItErrorCode::SUCCESS);
 
-    // 准备奖励消息
     std_msgs::Float32 reward_msg;
     if (result_msg.data) {
-        // 只有在执行成功时才计算奖励
         reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
-        ROS_INFO("[RLStep] Execution successful. Calculated reward: %f", reward_msg.data);
     } else {
-        // 如果执行失败，奖励直接设为0
-        reward_msg.data = 0.0;
-        ROS_WARN("[RLStep] Execution failed. Setting reward to 0.");
+        reward_msg.data = 0; // 对执行失败施加惩罚
     }
 
-    // 将奖励和结果连续发布，大大减少被干扰的可能
+    // 将结果和奖励发布回RL智能体
     g_reward_pub.publish(reward_msg);
     g_step_result_pub.publish(result_msg);
 
-    ros::Duration(0.1).sleep(); // 短暂延时确保消息发出
+    ros::Duration(0.1).sleep();
     return result_msg.data;
-    }
+}
+
 
 void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
 { 
@@ -632,15 +610,14 @@ int main(int argc, char** argv)
 
   ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
   ros::Subscriber python_ready_sub = nh.subscribe("/rl/ready_for_next", 1, pythonReadyCallback);
-  g_faulty_start_j4_pub = nh.advertise<std_msgs::Float32>("/rl/faulty_start_joint4", 10);
-  ros::Subscriber corrected_j4_sub = nh.subscribe("/rl/corrected_start_joint4", 1, correctedStartJointCallback);
-  // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
   ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
   g_step_result_pub = nh.advertise<std_msgs::Bool>("/rl/step_result", 10);
   g_joint_trajectory_command_pub = nh.advertise<trajectory_msgs::JointTrajectory>("/panda_arm_controller/command", 1);
-  ros::Subscriber faulty_joint_states_sub = nh.subscribe<sensor_msgs::JointState>("/faulty_joint_states", 10, faultyJointStatesCallback);
   g_reward_pub = nh.advertise<std_msgs::Float32>("/rl/trajectory_reward", 10); 
+  ros::Subscriber corrected_action_sub = nh.subscribe("/rl/corrected_start_joints", 1, correctedJointsCallback);
+  g_faulty_joints_pub = nh.advertise<std_msgs::Float32MultiArray>("/rl/faulty_joint_states", 10);
+
   ROS_INFO(" Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
