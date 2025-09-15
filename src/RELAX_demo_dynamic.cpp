@@ -30,10 +30,6 @@ const double tau = 2 * M_PI;
 #include <trajectory_msgs/JointTrajectory.h>
 #include <sensor_msgs/JointState.h>
 #include <angles/angles.h>
-#include <moveit/trajectory_processing/time_optimal_trajectory_generation.h>
-
-std::string g_csv_file_j4;                 // 例如 $HOME/rl_joint4_logs.csv
-std::mutex g_rec_mutex;                    // 保护 g_recorded_joint_states
 
 bool g_python_is_ready = false;
 bool g_is_recording = false; 
@@ -47,67 +43,6 @@ ros::Publisher g_reward_pub;
 ros::Publisher g_faulty_joints_pub;         // 发布“有问题的”规划起始关节状态给RL
 std::vector<double> g_corrected_joints;     // 用于存储完整的7个修正后的关节值
 bool g_corrected_joints_received = false; // 标志位
-
-static inline bool fileExists(const std::string& p){ std::ifstream f(p.c_str()); return f.good(); }
-void ensureJ4Header(const std::string& path){
-  if (fileExists(path)) return;
-  std::ofstream ofs(path, std::ios::out);
-  ofs << "phase,point_idx,t_from_start,joint4\n";
-  ofs.close();
-}
-
-int findJ4Index(const std::vector<std::string>& names){
-  for (size_t i=0;i<names.size();++i) if (names[i]=="panda_joint4") return static_cast<int>(i);
-  return -1;
-}
-
-// 仅保存 plan 的 joint4
-void appendPlanToCsv(const std::string& path,
-                       const std::string& phase,                // "initial_plan" / "corrected_plan"
-                       const moveit_msgs::RobotTrajectory& traj)
-{
-  const auto& jt = traj.joint_trajectory;
-  if (jt.joint_names.empty() || jt.points.empty()) return;
-  int j4 = findJ4Index(jt.joint_names);
-  if (j4 < 0) return;
-
-  ensureJ4Header(path);
-  std::ofstream ofs(path, std::ios::app);
-  for (size_t p=0; p<jt.points.size(); ++p){
-    const auto& pt = jt.points[p];
-    double j4_val = (j4 < (int)pt.positions.size()) ? pt.positions[j4] : std::numeric_limits<double>::quiet_NaN();
-    double t = pt.time_from_start.toSec();
-    ofs << phase << "," << p << "," << t << "," << std::setprecision(9) << j4_val << "\n";
-  }
-  ofs.close();
-}
-
-// 保存执行时的 joint4（/joint_states）
-void appendExecutedJ4ToCsv(const std::string& path,
-                           const std::vector<sensor_msgs::JointState>& data)
-{
-  if (data.empty()) return;
-  ensureJ4Header(path);
-
-  ros::Time t0 = data.front().header.stamp;
-  std::ofstream ofs(path, std::ios::app);
-
-  int j4_hint = findJ4Index(data.front().name);
-
-  for (size_t i=0; i<data.size(); ++i){
-    const auto& msg = data[i];
-    int idx = j4_hint;
-    if (idx < 0 || idx >= (int)msg.position.size()){
-      idx = findJ4Index(msg.name);
-    }
-    double j4_val = (idx >= 0 && idx < (int)msg.position.size()) ? msg.position[idx] : std::numeric_limits<double>::quiet_NaN();
-    double dt = (msg.header.stamp - t0).toSec(); if (dt < 0) dt = 0.0;
-
-    ofs << "executed_joint_states," << i << "," << dt << "," << std::setprecision(9) << j4_val << "\n";
-  }
-  ofs.close();
-}
-
 
 // 接收完整的7个关节值
 void correctedJointsCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
@@ -190,46 +125,30 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
     return target_reward;
 }
 
-
 bool createManualPlan(const std::vector<double>& start_joints,
                       const std::vector<double>& end_joints,
                       moveit::planning_interface::MoveGroupInterface::Plan& plan,
-                      moveit::planning_interface::MoveGroupInterface& move_group)
+                      moveit::planning_interface::MoveGroupInterface& move_group,
+                      double duration_sec = 2.0)
 {
+    // ROS_INFO("[ManualPlan] Creating plan from start to end...");
     moveit::core::RobotState start_state(move_group.getRobotModel());
     start_state.setJointGroupPositions(move_group.getName(), start_joints);
     
+    robot_trajectory::RobotTrajectory robot_traj(start_state.getRobotModel(), move_group.getName());
+    robot_traj.addSuffixWayPoint(start_state, 0.0);
+    
     moveit::core::RobotState end_state(move_group.getRobotModel());
     end_state.setJointGroupPositions(move_group.getName(), end_joints);
-
-    robot_trajectory::RobotTrajectory robot_traj(move_group.getRobotModel(), move_group.getName());
-
-    double distance = start_state.distance(end_state);
+    robot_traj.addSuffixWayPoint(end_state, duration_sec);
     
-    int steps = static_cast<int>(std::ceil(distance / 0.05));
-    if (steps < 2) steps = 2; // 保证至少有起点和终点
-
-    ROS_INFO("Distance between states is %.2f, interpolating with %d steps.", distance, steps);
-
-    for (int i = 0; i <= steps; ++i)
-    {
-        moveit::core::RobotState interpolated_state(start_state);
-        double ratio = static_cast<double>(i) / static_cast<double>(steps);
-        start_state.interpolate(end_state, ratio, interpolated_state);
-        robot_traj.addSuffixWayPoint(interpolated_state, 0.01);
-    }
-
-    // 4. 时间参数化
-    trajectory_processing::TimeOptimalTrajectoryGeneration totg;
-    if (!totg.computeTimeStamps(robot_traj, 0.3, 0.3)) {
-        ROS_ERROR("[ManualPlan] Failed to re-time the trajectory with TOTG!");
+    trajectory_processing::IterativeParabolicTimeParameterization iptp;
+    if (!iptp.computeTimeStamps(robot_traj, 1.0, 1.0)) {
+        ROS_ERROR("[ManualPlan] Failed to re-time the trajectory!");
         return false;
     }
     
     robot_traj.getRobotTrajectoryMsg(plan.trajectory_);
-    
-    ROS_INFO("[ManualPlan] Successfully created a DENSE plan with %zu points.", plan.trajectory_.joint_trajectory.points.size());
-    
     return true;
 }
 
@@ -269,8 +188,6 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
         ss << "]";
         ROS_INFO_STREAM("[RLStep] faulty_joints: " << ss.str());
     }
-    appendPlanToCsv(g_csv_file_j4, "initial_plan", initial_plan.trajectory_);
-
 
     // 步骤 2: 将“有问题的”关节值发送给Python，并等待修正动作
     std_msgs::Float32MultiArray msg_to_rl;
@@ -308,23 +225,26 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     
     // 步骤 4: 创建一个从修正后的起始状态到最终目标的新规划
     moveit::planning_interface::MoveGroupInterface::Plan final_plan;
-    if (!createManualPlan(corrected_joints, final_joints, final_plan, move_group)) {
+    if (!createManualPlan(corrected_joints, final_joints, final_plan, move_group, 2.0)) {
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
         std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
         return false;
     }
-    // appendPlanToCsv(g_csv_file_j4, "corrected_plan", final_plan.trajectory_);
 
-    std_msgs::Float32 reward_msg;
-    reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
-    
-    // 步骤 5: 执行规划
+    // 步骤 5: 执行规划并计算奖励
     moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
     
     std_msgs::Bool result_msg;
     result_msg.data = (result == moveit::core::MoveItErrorCode::SUCCESS);
 
-    // 将结果和奖励发布回RL
+    std_msgs::Float32 reward_msg;
+    if (result_msg.data) {
+        reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
+    } else {
+        reward_msg.data = 0; // 对执行失败施加惩罚
+    }
+
+    // 将结果和奖励发布回RL智能体
     g_reward_pub.publish(reward_msg);
     g_step_result_pub.publish(result_msg);
 
@@ -683,9 +603,6 @@ int main(int argc, char** argv)
 {
   ros::init(argc, argv, "own_pick_place_V4");
   ros::NodeHandle nh;
-  // const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
-  // g_csv_file_j4 = std::string(home) + "/rl_joint4_logs.csv";
-  // ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
 
   //Get information about robot state
   ros::AsyncSpinner spinner(2);
@@ -700,7 +617,7 @@ int main(int argc, char** argv)
   g_reward_pub = nh.advertise<std_msgs::Float32>("/rl/trajectory_reward", 10); 
   ros::Subscriber corrected_action_sub = nh.subscribe("/rl/corrected_start_joints", 1, correctedJointsCallback);
   g_faulty_joints_pub = nh.advertise<std_msgs::Float32MultiArray>("/rl/faulty_joint_states", 10);
-    
+
   ROS_INFO(" Publishing start signal...");
   std_msgs::Bool start_msg;
   start_msg.data = true;
@@ -839,10 +756,10 @@ int main(int argc, char** argv)
       
     // }
 
-    state.data = 6;
-    pose_state_pub.publish(state);
-    PlacePose(group_arm , "down");
-    ROS_INFO("Task 6: Place Pose (down) done.");
+    // state.data = 6;
+    // pose_state_pub.publish(state);
+    // PlacePose(group_arm , "down");
+    // ROS_INFO("Task 6: Place Pose (down) done.");
 
   //   {
   //     geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
@@ -857,10 +774,10 @@ int main(int argc, char** argv)
     // group_arm.detachObject(object_to_attach.id);
     // ROS_INFO("Task 7: Open Hand done");
     
-    state.data = 8;
-    pose_state_pub.publish(state);
-    PlacePose(group_arm , "up");
-    ROS_INFO("Task 8: Place Pose (up) done.");
+    // state.data = 8;
+    // pose_state_pub.publish(state);
+    // PlacePose(group_arm , "up");
+    // ROS_INFO("Task 8: Place Pose (up) done.");
     
 
   //   {
@@ -870,10 +787,10 @@ int main(int argc, char** argv)
   //     ROS_INFO("Task 8: Place Pose (up) done.");
   // }
     
-    // state.data = 9;
-    // pose_state_pub.publish(state);
-    // initPose(group_arm);
-    // ROS_INFO("Task 9: Init Pose done.");
+    state.data = 9;
+    pose_state_pub.publish(state);
+    initPose(group_arm);
+    ROS_INFO("Task 9: Init Pose done.");
    
     // {
     //     geometry_msgs::Pose target_pose_init;

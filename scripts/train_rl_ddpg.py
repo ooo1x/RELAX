@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     GAMMA = 0.99
-    MAX_CPP_EPISODES = 998  # Set the total number of episodes for the C++ node to run
+    MAX_CPP_EPISODES = 998   # Set the total number of episodes for the C++ node to run
     
     # --- Variable Initialization ---
     load_model_path = None

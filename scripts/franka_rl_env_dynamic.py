@@ -27,7 +27,7 @@ class FrankaRLEnv(Env):
         self.obstacle2 = np.array([0.75,  0.25, 1.2])
         self.obstacle3 = np.array([0.75, 0.0, 1.64])
         self.obstacles = [self.obstacle1, self.obstacle2,self.obstacle3]
-        # self.scene = PlanningSceneInterface()
+        self.scene = PlanningSceneInterface()
 
         self.faulty_indicator = np.array([0,0,0,1,0,0,0], dtype=np.float32)  
 
@@ -56,7 +56,7 @@ class FrankaRLEnv(Env):
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
         self.had_collision = False
         self.had_planning_failure = False
-        # self._add_obstacles_to_scene()
+        #self._add_obstacles_to_scene()
         self.visited_states = set()
         self.faulty_start_j4 = 0.0
         self.execution_aborted_flag = False
@@ -113,7 +113,7 @@ class FrankaRLEnv(Env):
         
     #     rospy.sleep(1) 
 
-    #     obstacle_radius = 0.1
+    #     obstacle_radius = 0.2
 
     #     for i, obs_pos in enumerate(self.obstacles):
     #         obs_name = f"obstacle{i+1}"
@@ -171,19 +171,14 @@ class FrankaRLEnv(Env):
             self.joint_states,
         ], dtype=np.float32)
 
-    
+
     def _compute_reward(self, planning_failed, cpp_provided_reward):
 
         PENALTY_PLANNING_FAILURE = -200.0
-        PENALTY_COLLISION_FROM_CPP = -200.0
         
         if planning_failed:
             rospy.logwarn("Planning failed. Applying penalty.")
-            return PENALTY_PLANNING_FAILURE,False
-        
-        if cpp_provided_reward <= PENALTY_COLLISION_FROM_CPP:
-            rospy.logwarn("C++ safety check reported a trajectory collision.")
-            return cpp_provided_reward, True 
+            return PENALTY_PLANNING_FAILURE,True
 
         trajectory_reward = cpp_provided_reward
         

@@ -384,7 +384,8 @@ int main(int argc, char** argv)
 
   // ros::Publisher goal_pub = nh.advertise<std_msgs::Bool>("goal_state", 1000);  
   ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
-  
+  ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
+
   ros::WallDuration(1.0).sleep();
   
 
@@ -401,7 +402,7 @@ int main(int argc, char** argv)
   group_arm.setMaxAccelerationScalingFactor(0.1);
   //group_arm.setNumPlanningAttempts(2);
 
-  for (int i = 1; i < 2 ;i = i + 1)
+  for (int i = 1; i < 51 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -517,12 +518,13 @@ int main(int argc, char** argv)
     // ROS_WARN("--------------------");
     //ros::WallDuration(3.0).sleep();
 
-    // state.data = 6;
-    // pose_state_pub.publish(state);
+    state.data = 6;
+    pose_state_pub.publish(state);
 
-    // // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
-    // // ROS_WARN("--------------------");
-    // PlacePose(group_arm , "down");
+    // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    PlacePose(group_arm , "down");
+    ROS_INFO("Task 6: Place Pose (down) done.");
     // // ROS_WARN("hover end at:%.8f",ros::Time::now().toSec());
     // // ROS_WARN("--------------------");
     // //ros::WallDuration(3.0).sleep();
@@ -540,26 +542,27 @@ int main(int argc, char** argv)
 
     // group_arm.detachObject(object_to_attach.id);
 
-    // state.data = 8;
-    // pose_state_pub.publish(state);
+    state.data = 8;
+    pose_state_pub.publish(state);
 
-    // // Move up and to init pose
-    // // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
-    // // ROS_WARN("--------------------");
-    // PlacePose(group_arm , "up");
+    // Move up and to init pose
+    // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
+    // ROS_WARN("--------------------");
+    PlacePose(group_arm , "up");
+    ROS_INFO("Task 8: Place Pose (up) done.");
     // // ROS_WARN("Placeup end at:%.8f",ros::Time::now().toSec());
     // // ROS_WARN("--------------------");
     // //ros::WallDuration(3.0).sleep();
     
-    state.data = 9;
-    pose_state_pub.publish(state);
+    // state.data = 9;
+    // pose_state_pub.publish(state);
 
-    // ROS_WARN("Gotoinit start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    initPose(group_arm);
-    ROS_INFO("Task 9: Init Pose done");
-    // ROS_WARN("Gotoinit end at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
+    // // ROS_WARN("Gotoinit start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // initPose(group_arm);
+    // ROS_INFO("Task 9: Init Pose done");
+    // // ROS_WARN("Gotoinit end at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
     state.data = 404;
     pose_state_pub.publish(state);
 
@@ -567,6 +570,11 @@ int main(int argc, char** argv)
     ROS_WARN("round end");
     // ros::WallDuration(2.0).sleep();
     // ROS_WARN("--------------------");
+    
+    std_msgs::Int32 episodeMsg;
+    episodeMsg.data = i;
+    episode_pub.publish(episodeMsg);
+    ROS_INFO("Episode %d published", i);
   
   }
   ros::shutdown();

@@ -31,11 +31,13 @@ def joint_state_callback(joint_state_msg):
         panda_pose.pose.position.z = trans.transform.translation.z
 
         end_effector_position = (panda_pose.pose.position.x, panda_pose.pose.position.y, panda_pose.pose.position.z)
-        print(f"end_effector_position",{end_effector_position})
+        # print(f"end_effector_position",{end_effector_position})
 
         distances = [np.linalg.norm(end_effector_position - obs) for obs in obstacles]
         distance_msg = Float32MultiArray(data=distances)
         distances_pub.publish(distance_msg)
+        print(','.join(map(str, distances)))
+
        
         # hand1_model_pose_position = get_model_state("hand_1")
         # hand2_model_pose_position = get_model_state("hand_2")
@@ -68,19 +70,31 @@ def joint_state_callback(joint_state_msg):
     except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
         rospy.logwarn("Transform lookup failed!")
 
+def episode_callback(msg):
+    """
+    This function is called every time a message is published on the /episode topic.
+    """
+    # msg.data contains the integer value of the episode number
+    episode_number = msg.data
+    
+    # Print a clear separator to the standard output
+    print("="*60)
+    print(f"--- EPISODE {episode_number} COMPLETE ---")
+    print("="*60)
+
 if __name__ == '__main__':
     rospy.init_node('end_effector_localization')
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
     obstacles = [
-        np.array([0.75, -0.25, 1.2]),
+        np.array([0.75, -0.35, 1.2]),
         np.array([0.75,  0.25, 1.2]),
         np.array([0.75,  0.0,  1.64])
     ]
    
     joint_state_sub=rospy.Subscriber('/joint_states', JointState, joint_state_callback)
     distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
-
+    episode_sub = rospy.Subscriber("/episode", Int32, episode_callback)
     # distance1_pub = rospy.Publisher('/distance_between_end_effector_and_hand1', Float32, queue_size=100)
     # distance2_pub = rospy.Publisher('/distance_between_end_effector_and_hand2', Float32, queue_size=100)
     # safety_violation_pub = rospy.Publisher('/safety_violation', Int32, queue_size=100)
