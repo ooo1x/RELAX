@@ -21,6 +21,7 @@ joint_names:
 panda_joint4
 
 Episode 37/50 smaller than 0.2 
+Evaluation: 1/50 smaller than 0.2
 
 2. fault_duration_min: 10
 fault_duration_max: 10
@@ -31,3 +32,8 @@ joint_names:
 panda_joint4
 
 Episode 50/50 smaller than 0.2 
+
+Evaluation: 1/50 smaller than 0.2
+
+3. change target position 0.05
+evaluation 3/50 smaller than 0.2

@@ -11,6 +11,15 @@ from std_msgs.msg import Float32
 from gazebo_msgs.srv import SetModelState
 from gazebo_msgs.msg import ModelState
 
+obstacles = []
+def obstacle_callback(msg):
+    global obstacles
+    try:
+        new_obstacles = np.array(msg.data).reshape(-1, 3)
+        obstacles = [np.array(o) for o in new_obstacles]
+    except ValueError as e:
+        rospy.logwarn(f"No Obstacles: {e}")
+
 def calculate_distance(point1, point2):
     distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2 + (point1[2] - point2[2])**2)
     return distance
@@ -86,17 +95,13 @@ if __name__ == '__main__':
     rospy.init_node('end_effector_localization')
     tfBuffer = tf2_ros.Buffer()
     listener = tf2_ros.TransformListener(tfBuffer)
-    obstacles = [
-        np.array([0.75, -0.35, 1.2]),
-        np.array([0.75,  0.25, 1.2]),
-        np.array([0.75,  0.0,  1.64])
-    ]
-   
+
     joint_state_sub=rospy.Subscriber('/joint_states', JointState, joint_state_callback)
     distances_pub = rospy.Publisher('/distances_to_obstacles', Float32MultiArray, queue_size=10)
     episode_sub = rospy.Subscriber("/episode", Int32, episode_callback)
     # distance1_pub = rospy.Publisher('/distance_between_end_effector_and_hand1', Float32, queue_size=100)
     # distance2_pub = rospy.Publisher('/distance_between_end_effector_and_hand2', Float32, queue_size=100)
     # safety_violation_pub = rospy.Publisher('/safety_violation', Int32, queue_size=100)
+    obstacle_sub = rospy.Subscriber('/obstacle_positions', Float32MultiArray, obstacle_callback)
    
     rospy.spin()

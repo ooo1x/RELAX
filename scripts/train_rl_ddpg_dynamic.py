@@ -12,7 +12,7 @@ from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from stable_baselines3.common.logger import configure
 
-from franka_rl_env import FrankaRLEnv # Assuming this file is in the same directory or accessible
+from franka_rl_env_dynamic import FrankaRLEnv # Assuming this file is in the same directory or accessible
 from std_msgs.msg import Int32
 
 # --- DIRECTORY SETUP ---
@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     GAMMA = 0.99
-    MAX_CPP_EPISODES = 1998   # Set the total number of episodes for the C++ node to run
+    MAX_CPP_EPISODES = 3998   # Set the total number of episodes for the C++ node to run
     
     # --- Variable Initialization ---
     load_model_path = None
@@ -179,7 +179,7 @@ if __name__ == "__main__":
         action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
                      gamma=GAMMA, tensorboard_log=TENSORBOARD_LOG_DIR,
-                     buffer_size=100000, learning_starts=800)
+                     buffer_size=100000, learning_starts=1000)
 
     # --- Setup Callbacks ---
     ros_tracker = RosStateTracker()

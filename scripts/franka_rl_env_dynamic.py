@@ -22,17 +22,12 @@ class FrankaRLEnv(Env):
         rospy.loginfo("Initializing FrankaRLEnv...")
         self.move_group = MoveGroupCommander("panda_manipulator")
 
-        # Set obstacles and goals
-        self.obstacle1 = np.array([0.75, -0.35, 1.2])
-        self.obstacle2 = np.array([0.75,  0.25, 1.2])
-        self.obstacle3 = np.array([0.75, 0.0, 1.64])
-        self.obstacles = [self.obstacle1, self.obstacle2,self.obstacle3]
-        self.scene = PlanningSceneInterface()
-
         self.faulty_indicator = np.array([0,0,0,1,0,0,0], dtype=np.float32)  
+        self.num_obstacles = 3
+        self.num_joints = 7
 
         # Set state space: current_joint_states(7)
-        obs_dim = 7
+        obs_dim = 7 + self.num_obstacles * 3
         high_bounds = np.array([np.inf] * obs_dim, dtype=np.float32)
         self.observation_space = spaces.Box(low=-high_bounds, high=high_bounds, dtype=np.float32)
 
@@ -61,12 +56,12 @@ class FrankaRLEnv(Env):
         self.faulty_start_j4 = 0.0
         self.execution_aborted_flag = False
         self.trajectory_reward = 0.0
+        self.full_observation = np.zeros(obs_dim, dtype=np.float32)
 
         # ROS communication
         self.corrected_start_pub = rospy.Publisher("/rl/corrected_start_joints", Float32MultiArray, queue_size=10)
         self.ready_pub = rospy.Publisher('/rl/ready_for_next', Bool, queue_size=1)
-        self.joint_states = np.zeros(7) # Panda7个关节
-        rospy.Subscriber('/rl/faulty_joint_states', Float32MultiArray, self._faulty_joints_callback, queue_size=1)
+        rospy.Subscriber('/rl/faulty_joint_states', Float32MultiArray, self._observation_callback, queue_size=1)
         rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=10)
         rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=10)
         rospy.Subscriber('pose_state', Int32, self._pose_state_callback, queue_size=10)
@@ -84,12 +79,14 @@ class FrankaRLEnv(Env):
         self.step_succeeded = msg.data
         self.step_result_event.set() 
     
-    def _faulty_joints_callback(self, msg: Float32MultiArray):
-        if len(msg.data) == 7:
-            self.joint_states = np.array(msg.data, dtype=np.float32)
+
+    def _observation_callback(self, msg: Float32MultiArray):
+        expected_len = self.num_joints + self.num_obstacles * 3
+        if len(msg.data) == expected_len:
+            self.full_observation = np.array(msg.data, dtype=np.float32)
             self.request_event.set()
         else:
-            rospy.logwarn(f"Received joint states with unexpected length: {len(msg.data)}")
+            rospy.logwarn(f"Received observation with unexpected length: {len(msg.data)}.")
     
     def _pose_state_callback(self, msg):
             self.pose_state = msg.data
@@ -161,24 +158,16 @@ class FrankaRLEnv(Env):
         return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2 + (point1[2] - point2[2])**2)
     
     def _get_observation(self):
-        ee_position = np.array(self.get_ee_position(), dtype=np.float32)
-        
-        vec_to_obs1 = self.obstacle1 - ee_position
-        vec_to_obs2 = self.obstacle2 - ee_position
-        vec_to_obs3 = self.obstacle3 - ee_position
-
-        return np.concatenate([
-            self.joint_states,
-        ], dtype=np.float32)
+        return self.full_observation
 
 
     def _compute_reward(self, planning_failed, cpp_provided_reward):
 
         PENALTY_PLANNING_FAILURE = -200.0
         
-        if planning_failed:
-            rospy.logwarn("Planning failed. Applying penalty.")
-            return PENALTY_PLANNING_FAILURE,True
+        # if planning_failed:
+        #     rospy.logwarn("Planning failed. Applying penalty.")
+        #     return PENALTY_PLANNING_FAILURE,True
 
         trajectory_reward = cpp_provided_reward
         
@@ -222,7 +211,9 @@ class FrankaRLEnv(Env):
         action = np.clip(action, self.joint_lower, self.joint_upper)
 
         mask = self.faulty_indicator.astype(bool)
-        corrected = self.joint_states.copy()
+        current_joint_states = self.full_observation[:self.num_joints]
+
+        corrected = current_joint_states.copy()
         corrected[mask] = action[mask]
 
         corrected = np.clip(corrected, self.joint_lower, self.joint_upper)
@@ -255,7 +246,7 @@ class FrankaRLEnv(Env):
         REQUIRED_STATES = {4, 5}
         if REQUIRED_STATES.issubset(self.visited_states):
             if not self.had_planning_failure:
-                reward += 200
+                reward += 0
         
         terminated = self.episode_is_over
 

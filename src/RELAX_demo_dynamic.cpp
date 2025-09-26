@@ -43,11 +43,11 @@ ros::Publisher g_reward_pub;
 ros::Publisher g_faulty_joints_pub;         // 发布“有问题的”规划起始关节状态给RL
 std::vector<double> g_corrected_joints;     // 用于存储完整的7个修正后的关节值
 bool g_corrected_joints_received = false; // 标志位
+ros::Publisher g_obstacle_pub; 
 
 // 接收完整的7个关节值
 void correctedJointsCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
 {
-  // 检查收到的数据是否包含7个元素
   if (msg->data.size() == 7)
   {
     g_corrected_joints.assign(msg->data.begin(), msg->data.end());
@@ -59,12 +59,87 @@ ROS_WARN("Received array with incorrect size (was %zu), message ignored.", msg->
 }
 }
 
-std::vector<Eigen::Vector3d> g_obstacles = {
-    Eigen::Vector3d(0.75, -0.35, 1.2),
-    Eigen::Vector3d(0.75, 0.25, 1.2),
-    Eigen::Vector3d(0.75, 0.0, 1.64)
-};
+std::vector<Eigen::Vector3d> g_obstacles;
+
+void generateAndPublishObstacles()
+{
+    const double base_x = 0.7;
+    const double base_y1 = -0.3;
+    const double base_y2 = 0.3;
+    const double base_y3 = 0.0;
+    const double base_z1 = 1.2;
+    const double base_z2 = 1.6;
+
+    const double perturbation_range = 0.03; 
+
+
+    std::random_device rd;
+    std::mt19_37 gen(rd());
+
+    std::uniform_real_distribution<> distX_perturbed(base_x - perturbation_range, base_x + perturbation_range);
+    
+    std::uniform_real_distribution<> distY1_perturbed(base_y1 - perturbation_range, base_y1 + perturbation_range);
+    std::uniform_real_distribution<> distY2_perturbed(base_y2 - perturbation_range, base_y2 + perturbation_range);
+    std::uniform_real_distribution<> distY3_perturbed(base_y3 - perturbation_range, base_y3 + perturbation_range);
+
+    std::uniform_real_distribution<> distZ1_perturbed(base_z1 - perturbation_range, base_z1 + perturbation_range);
+    std::uniform_real_distribution<> distZ2_perturbed(base_z2 - perturbation_range, base_z2 + perturbation_range);
+
+    g_obstacles.clear();
+    g_obstacles.push_back(Eigen::Vector3d(distX_perturbed(gen), distY1_perturbed(gen), distZ1_perturbed(gen)));
+    g_obstacles.push_back(Eigen::Vector3d(distX_perturbed(gen), distY2_perturbed(gen), distZ1_perturbed(gen)));
+    g_obstacles.push_back(Eigen::Vector3d(distX_perturbed(gen), distY3_perturbed(gen), distZ2_perturbed(gen)));
+    
+    std_msgs::Float32MultiArray msg;
+    for (const auto& obs : g_obstacles)
+    {
+        msg.data.push_back(static_cast<float>(obs.x()));
+        msg.data.push_back(static_cast<float>(obs.y()));
+        msg.data.push_back(static_cast<float>(obs.z()));
+    }
+    
+    g_obstacle_pub.publish(msg);
+    for (size_t i = 0; i < g_obstacles.size(); ++i) {
+      ROS_INFO("Obstacle %zu position: x=%.3f, y=%.3f, z=%.3f", i, g_obstacles[i].x(), g_obstacles[i].y(), g_obstacles[i].z());
+    }
+}
+
+void updateObstaclesInPlanningScene(moveit::planning_interface::PlanningSceneInterface& planning_scene_interface)
+{
+    // 创建一个用于存储碰撞体的向量
+    std::vector<moveit_msgs::CollisionObject> collision_objects;
+
+    for (size_t i = 0; i < g_obstacles.size(); ++i)
+    {
+        moveit_msgs::CollisionObject collision_object;
+        
+        collision_object.header.frame_id = "world"; 
+        collision_object.id = "obstacle" + std::to_string(i + 1);
+
+        shape_msgs::SolidPrimitive primitive;
+        primitive.type = primitive.SPHERE;
+        primitive.dimensions.resize(1);
+        primitive.dimensions[0] = 0.2; 
+
+        geometry_msgs::Pose obstacle_pose;
+        obstacle_pose.orientation.w = 1.0;
+        obstacle_pose.position.x = g_obstacles[i].x();
+        obstacle_pose.position.y = g_obstacles[i].y();
+        obstacle_pose.position.z = g_obstacles[i].z();
+
+        collision_object.primitives.push_back(primitive);
+        collision_object.primitive_poses.push_back(obstacle_pose);
+        collision_object.operation = collision_object.ADD;
+
+        collision_objects.push_back(collision_object);
+    }
+    
+    planning_scene_interface.applyCollisionObjects(collision_objects);
+}
+
+
 const double COLLISION_THRESHOLD = 0.20;
+
 
 void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
 {
@@ -79,28 +154,30 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
                               const std::vector<double>& start_joints,
                               const geometry_msgs::Pose& target_pose)
 {
-    const float TARGET_REWARD_WEIGHT = 100.0f;
-    const float PENALTY_COLLISION = -200.0f;
-    const float SUCCESSFULLY_REWARD = 200.0f;
+    const float PENALTY_COLLISION = -200.0f;       // 碰撞惩罚
+    const float MAX_DISTANCE_REWARD = 100.0f;      // 距离奖励的最大值（完美到达目标时获得）
+    const float DISTANCE_SENSITIVITY = 15.0f;      // 距离敏感度：值越大，要求越接近目标才能获得高分
 
     if (trajectory.joint_trajectory.points.empty())
     {
-        ROS_WARN("Planned trajectory is empty, reward is 0.");
-        return 0.0f;
+        ROS_WARN("Planned trajectory is empty, this is considered a failure.");
+        return 0.0f; 
     }
     
     moveit::core::RobotState robot_state(robot_model);
+    Eigen::Vector3d last_ee_position(0, 0, 0); 
+
     for (const auto& point : trajectory.joint_trajectory.points)
     {
         if (point.positions.empty()) continue;
 
         robot_state.setJointGroupPositions("panda_manipulator", point.positions);
         const Eigen::Isometry3d& ee_pose = robot_state.getGlobalLinkTransform("panda_hand_tcp");
-        Eigen::Vector3d ee_position = ee_pose.translation();
+        last_ee_position = ee_pose.translation(); 
 
         for (const auto& obs_pos : g_obstacles)
         {
-            double dist = (ee_position - obs_pos).norm();
+            double dist = (last_ee_position - obs_pos).norm();
             if (dist <= COLLISION_THRESHOLD)
             {
                 ROS_WARN("Trajectory failed safety check. Applying collision penalty.");
@@ -109,20 +186,15 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
         }
     }
 
-    ROS_INFO("Trajectory passed safety check. Calculating target reward.");
-
-    moveit::core::RobotState start_state(robot_model);
-    start_state.setJointGroupPositions("panda_manipulator", start_joints);
-    const Eigen::Isometry3d& start_ee_pose = start_state.getGlobalLinkTransform("panda_hand_tcp");
-    Eigen::Vector3d start_ee_position = start_ee_pose.translation();
+    ROS_INFO("Trajectory passed safety check. Calculating distance-based reward.");
 
     Eigen::Vector3d target_position(target_pose.position.x, target_pose.position.y, target_pose.position.z);
 
-    double initial_distance_to_target = (start_ee_position - target_position).norm();
-    float target_reward = initial_distance_to_target * TARGET_REWARD_WEIGHT;
-    float total_reward = target_reward + SUCCESSFULLY_REWARD;
+    double distance_to_target = (last_ee_position - target_position).norm();
 
-    return target_reward;
+    float distance_reward = MAX_DISTANCE_REWARD * exp(-DISTANCE_SENSITIVITY * distance_to_target);
+    
+    return distance_reward;
 }
 
 bool createManualPlan(const std::vector<double>& start_joints,
@@ -153,7 +225,7 @@ bool createManualPlan(const std::vector<double>& start_joints,
 }
 
 bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, const geometry_msgs::Pose& final_target_pose)
-{
+{   
     g_corrected_joints_received = false;
 
     // 步骤 1: 规划一次路径，以获取初始的、“有问题的”关节状态
@@ -164,13 +236,13 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     if (move_group.plan(initial_plan) != moveit::core::MoveItErrorCode::SUCCESS)
     {
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -200.0f; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
+        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
         return false;
     }
 
     if (initial_plan.trajectory_.joint_trajectory.points.empty()) {
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -200.0f; g_reward_pub.publish(reward_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
         return false;
     }
 
@@ -189,18 +261,34 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
         ROS_INFO_STREAM("[RLStep] faulty_joints: " << ss.str());
     }
 
-    // 步骤 2: 将“有问题的”关节值发送给Python，并等待修正动作
-    std_msgs::Float32MultiArray msg_to_rl;
+
+
+    // 步骤 2: 将完整的观察（关节状态 + 障碍物位置）发送给Python
+    std_msgs::Float32MultiArray observation_msg; // 重命名变量以更清晰地表示其内容
+
     for (const auto& joint_value : faulty_start_joints)
     {
-        msg_to_rl.data.push_back(static_cast<float>(joint_value));
+        observation_msg.data.push_back(static_cast<float>(joint_value));
     }
+
+    for (const auto& obs_pos : g_obstacles)
+    {
+        observation_msg.data.push_back(static_cast<float>(obs_pos.x()));
+        observation_msg.data.push_back(static_cast<float>(obs_pos.y()));
+        observation_msg.data.push_back(static_cast<float>(obs_pos.z()));
+    }
+
+    // 打印新的观察向量，用于调试
+    std::stringstream ss_obs;
+    ss_obs << "[RLStep] Sending observation to Python (size=" << observation_msg.data.size() << "): ";
+    for(const auto& val : observation_msg.data) ss_obs << std::fixed << std::setprecision(3) << val << " ";
+    ROS_INFO_STREAM(ss_obs.str());
     
     ros::Rate r(10);
     ros::Time start_time = ros::Time::now();
     while(ros::ok() && !g_corrected_joints_received)
     {
-        g_faulty_joints_pub.publish(msg_to_rl);
+        g_faulty_joints_pub.publish(observation_msg);
         ros::spinOnce();
         r.sleep();
         if ((ros::Time::now() - start_time).toSec() > 5.0) {
@@ -617,6 +705,8 @@ int main(int argc, char** argv)
   g_reward_pub = nh.advertise<std_msgs::Float32>("/rl/trajectory_reward", 10); 
   ros::Subscriber corrected_action_sub = nh.subscribe("/rl/corrected_start_joints", 1, correctedJointsCallback);
   g_faulty_joints_pub = nh.advertise<std_msgs::Float32MultiArray>("/rl/faulty_joint_states", 10);
+  g_obstacle_pub = nh.advertise<std_msgs::Float32MultiArray>("/obstacle_positions", 1, true);
+
 
   ROS_INFO(" Publishing start signal...");
   std_msgs::Bool start_msg;
@@ -635,14 +725,16 @@ int main(int argc, char** argv)
   
   // Set parameters for group like planner, speed, acceleration
   group_arm.setPlannerId("RRTConnect");
-  group_arm.setMaxVelocityScalingFactor(0.3);
-  group_arm.setMaxAccelerationScalingFactor(0.3);
-  group_arm.setNumPlanningAttempts(2);
+  group_arm.setMaxVelocityScalingFactor(1);
+  group_arm.setMaxAccelerationScalingFactor(3);
+  group_arm.setNumPlanningAttempts(1);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 1000 ;i = i + 1)
+  for (int i = 1; i < 4000 ;i = i + 1)
   { 
-        
+    generateAndPublishObstacles();
+    updateObstaclesInPlanningScene(planning_scene_interface);
+
     // Add Objects to the envoirement
     addCollisionObjects(planning_scene_interface);
 

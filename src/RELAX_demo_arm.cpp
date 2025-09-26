@@ -723,7 +723,7 @@ int main(int argc, char** argv)
   group_arm.setNumPlanningAttempts(2);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 1000 ;i = i + 1)
+  for (int i = 1; i < 2000 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
@@ -812,24 +812,54 @@ int main(int argc, char** argv)
       state.data = 4;
       pose_state_pub.publish(state);
       {
-        geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-        original_target.position.z += 0.26; 
-        performRLStep(group_arm, original_target);
-        ROS_INFO("Task 4: Lift up done");
-        }
+        geometry_msgs::Pose target_pose = group_arm.getCurrentPose().pose;
+
+        const double xy_radius = 0.05;
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> distrib(-xy_radius, xy_radius);
+
+        target_pose.position.x += distrib(gen);
+        target_pose.position.y += distrib(gen);
+        target_pose.position.z += 0.26; 
+
+        performRLStep(group_arm, target_pose);
+        
+        ROS_INFO("Task 4: Lift up done at [x: %f, y: %f, z: %f]",
+                 target_pose.position.x,
+                 target_pose.position.y,
+                 target_pose.position.z);
+      }
 
       state.data = 5;
       pose_state_pub.publish(state);
       {
-        geometry_msgs::Pose original_target;
+        geometry_msgs::Pose target_pose;
         tf2::Quaternion orientation;
         orientation.setRPY(-tau/2, 0, -tau/8);
-        original_target.orientation = tf2::toMsg(orientation);
-        original_target.position.x = 0.502; 
-        original_target.position.y = 0.2;
-        original_target.position.z = 1.5;
-        performRLStep(group_arm, original_target);
-        ROS_INFO("Task 5: Hover Place Pose done");
+        target_pose.orientation = tf2::toMsg(orientation);
+
+        const double center_x = 0.502;
+        const double center_y = 0.2;
+        const double center_z = 1.5;
+
+        const double radius = 0.05;
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> distrib(-radius, radius);
+
+        target_pose.position.x = center_x + distrib(gen); 
+        target_pose.position.y = center_y + distrib(gen); 
+        target_pose.position.z = center_z;                
+
+        performRLStep(group_arm, target_pose);
+
+        ROS_INFO("Task 5: Hover Place Pose done at [x: %f, y: %f, z: %f]",
+                 target_pose.position.x,
+                 target_pose.position.y,
+                 target_pose.position.z);
      }
 
     //   ROS_INFO("Returning to state 2 position...");
