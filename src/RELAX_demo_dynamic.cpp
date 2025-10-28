@@ -30,6 +30,8 @@ const double tau = 2 * M_PI;
 #include <trajectory_msgs/JointTrajectory.h>
 #include <sensor_msgs/JointState.h>
 #include <angles/angles.h>
+#include <moveit/planning_scene/planning_scene.h>
+#include <moveit/robot_state/conversions.h>
 
 bool g_python_is_ready = false;
 bool g_is_recording = false; 
@@ -44,6 +46,8 @@ ros::Publisher g_faulty_joints_pub;         // 发布“有问题的”规划起
 std::vector<double> g_corrected_joints;     // 用于存储完整的7个修正后的关节值
 bool g_corrected_joints_received = false; // 标志位
 ros::Publisher g_obstacle_pub; 
+std::vector<double> g_last_joints;
+
 
 // 接收完整的7个关节值
 void correctedJointsCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
@@ -70,12 +74,11 @@ void generateAndPublishObstacles()
     const double base_z1 = 1.2;
     const double base_z2 = 1.6;
 
-    const double perturbation_range = 0.03; 
+    const double perturbation_range = 0.2; 
 
 
     std::random_device rd;
-    std::mt19_37 gen(rd());
-
+    std::mt19937 gen(rd());
     std::uniform_real_distribution<> distX_perturbed(base_x - perturbation_range, base_x + perturbation_range);
     
     std::uniform_real_distribution<> distY1_perturbed(base_y1 - perturbation_range, base_y1 + perturbation_range);
@@ -103,6 +106,7 @@ void generateAndPublishObstacles()
       ROS_INFO("Obstacle %zu position: x=%.3f, y=%.3f, z=%.3f", i, g_obstacles[i].x(), g_obstacles[i].y(), g_obstacles[i].z());
     }
 }
+
 
 void updateObstaclesInPlanningScene(moveit::planning_interface::PlanningSceneInterface& planning_scene_interface)
 {
@@ -151,51 +155,150 @@ void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
 
 float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
                               const moveit::core::RobotModelConstPtr& robot_model,
-                              const std::vector<double>& start_joints,
                               const geometry_msgs::Pose& target_pose)
 {
-    const float PENALTY_COLLISION = -200.0f;       // 碰撞惩罚
-    const float MAX_DISTANCE_REWARD = 100.0f;      // 距离奖励的最大值（完美到达目标时获得）
-    const float DISTANCE_SENSITIVITY = 15.0f;      // 距离敏感度：值越大，要求越接近目标才能获得高分
-
+    // --- 1. 对灾难性失败的惩罚 ---
     if (trajectory.joint_trajectory.points.empty())
     {
-        ROS_WARN("Planned trajectory is empty, this is considered a failure.");
-        return 0.0f; 
+        return -100.0f; // 惩罚无法生成规划的起点
     }
-    
-    moveit::core::RobotState robot_state(robot_model);
-    Eigen::Vector3d last_ee_position(0, 0, 0); 
 
-    for (const auto& point : trajectory.joint_trajectory.points)
+    // --- 2. 计算轨迹的安全性（核心稠密奖励）---
+    double min_dist_trajectory = std::numeric_limits<double>::infinity();
+    moveit::core::RobotState rs(robot_model);
+    const auto& jnames = trajectory.joint_trajectory.joint_names;
+
+    for (const auto& pt : trajectory.joint_trajectory.points)
     {
-        if (point.positions.empty()) continue;
-
-        robot_state.setJointGroupPositions("panda_manipulator", point.positions);
-        const Eigen::Isometry3d& ee_pose = robot_state.getGlobalLinkTransform("panda_hand_tcp");
-        last_ee_position = ee_pose.translation(); 
-
-        for (const auto& obs_pos : g_obstacles)
+        rs.setVariablePositions(jnames, pt.positions);
+        Eigen::Vector3d ee = rs.getGlobalLinkTransform("panda_hand_tcp").translation();
+        for (const auto& obs : g_obstacles)
         {
-            double dist = (last_ee_position - obs_pos).norm();
-            if (dist <= COLLISION_THRESHOLD)
+            double d = (ee - obs).norm();
+            if (d < min_dist_trajectory)
             {
-                ROS_WARN("Trajectory failed safety check. Applying collision penalty.");
-                return PENALTY_COLLISION;
+                min_dist_trajectory = d;
             }
         }
     }
 
-    ROS_INFO("Trajectory passed safety check. Calculating distance-based reward.");
+    // --- 3. 对碰撞风险的惩罚 ---
+    const double COLLISION_THRESHOLD = 0.20; // 危险距离阈值
+    if (min_dist_trajectory < COLLISION_THRESHOLD)
+    {
+        return -200.0f; // 对危险行为给予最严厉的惩罚
+    }
 
-    Eigen::Vector3d target_position(target_pose.position.x, target_pose.position.y, target_pose.position.z);
+    // --- 4. 对成功的规划进行奖励 ---
+    // 主要奖励来源是“安全距离”。离障碍物越远，奖励越高。
+    float safety_reward = 50.0f * static_cast<float>(min_dist_trajectory);
 
-    double distance_to_target = (last_ee_position - target_position).norm();
+    // (可选) 附加一个小的“目标达成”奖励，鼓励它规划到终点
+    // 但这个奖励值要远小于安全奖励，避免Agent为了这点小利而冒险
+    moveit::core::RobotState last_state(robot_model);
+    last_state.setJointGroupPositions("panda_manipulator", trajectory.joint_trajectory.points.back().positions);
+    Eigen::Vector3d final_ee = last_state.getGlobalLinkTransform("panda_hand_tcp").translation();
+    Eigen::Vector3d goal(target_pose.position.x, target_pose.position.y, target_pose.position.z);
+    double final_goal_error = (final_ee - goal).norm();
 
-    float distance_reward = MAX_DISTANCE_REWARD * exp(-DISTANCE_SENSITIVITY * distance_to_target);
-    
-    return distance_reward;
+    // 使用 tanh 函数将误差映射到 (0, 1) 区间，创造一个有界的小奖励
+    float goal_reward = 10.0f * (1.0f - static_cast<float>(tanh(final_goal_error)));
+
+    float total_reward = safety_reward + goal_reward;
+
+    return total_reward;
 }
+
+
+void logPlannedEndpointEE(const moveit_msgs::RobotTrajectory& traj,
+                          const moveit::core::RobotModelConstPtr& model,
+                          const std::string& group_name = "panda_manipulator",
+                          const std::string& ee_link = "panda_hand_tcp")
+{
+  if (traj.joint_trajectory.points.empty()) {
+    ROS_WARN("[PlanOnly] Empty trajectory, cannot log EE pose.");
+    return;
+  }
+  const auto& last = traj.joint_trajectory.points.back().positions;
+  moveit::core::RobotState rs(model);
+  rs.setJointGroupPositions(group_name, last);
+  const Eigen::Isometry3d& T = rs.getGlobalLinkTransform(ee_link);
+  const Eigen::Vector3d p = T.translation();
+  Eigen::Quaterniond q(T.rotation());
+  ROS_INFO_STREAM(std::fixed << std::setprecision(4)
+      << "[PlanOnly] Planned end EE pose (fake): "
+      << "pos=(" << p.x() << ", " << p.y() << ", " << p.z() << "), "
+      << "quat=(" << q.x() << ", " << q.y() << ", " << q.z() << ", " << q.w() << ")");
+}
+
+static void setStartFromLastOrCurrent(moveit::planning_interface::MoveGroupInterface& move_group)
+{
+  if (!g_last_joints.empty()) {
+    moveit::core::RobotState rs(move_group.getRobotModel());
+    rs.setJointGroupPositions("panda_manipulator", g_last_joints);
+    move_group.setStartState(rs);
+  } else {
+    move_group.setStartStateToCurrentState();
+  }
+}
+
+static void updateLastFromTrajectory(const moveit_msgs::RobotTrajectory& traj)
+{
+  if (!traj.joint_trajectory.points.empty()) {
+    g_last_joints = traj.joint_trajectory.points.back().positions;
+  }
+}
+
+bool planToPoseOnly(moveit::planning_interface::MoveGroupInterface& move_group,
+                    const geometry_msgs::Pose& target_pose,
+                    moveit::planning_interface::MoveGroupInterface::Plan& out_plan)
+{
+  setStartFromLastOrCurrent(move_group);      // 用虚拟当前关节做起点
+  move_group.setPoseTarget(target_pose);
+
+  auto rc = move_group.plan(out_plan);
+  if (rc == moveit::core::MoveItErrorCode::SUCCESS) {
+    logPlannedEndpointEE(out_plan.trajectory_, move_group.getRobotModel());
+    updateLastFromTrajectory(out_plan.trajectory_);  //规划成功后记住末点
+    return true;
+  } else {
+    ROS_WARN("[PlanOnly] plan to pose failed.");
+    return false;
+  }
+}
+
+bool planCartesianOnly(moveit::planning_interface::MoveGroupInterface& move_group,
+                       const std::vector<geometry_msgs::Pose>& waypoints,
+                       moveit_msgs::RobotTrajectory& trajectory_msg,
+                       double eef_step = 0.01, double jump_threshold = 0.0,
+                       double vel_scale = 0.1, double acc_scale = 0.1)
+{
+  setStartFromLastOrCurrent(move_group);  // 用“虚拟当前关节”做起点
+  move_group.setPlanningTime(10.0);
+
+  double fraction = move_group.computeCartesianPath(waypoints, eef_step, jump_threshold,
+                                                    trajectory_msg, false);
+  if (fraction <= 0.0) {
+    ROS_WARN("[PlanOnly][Cartesian] computeCartesianPath failed, fraction=%.3f", fraction);
+    return false;
+  }
+
+  robot_trajectory::RobotTrajectory rt(move_group.getCurrentState()->getRobotModel(),
+                                       "panda_manipulator");
+  rt.setRobotTrajectoryMsg(*move_group.getCurrentState(), trajectory_msg);
+
+  trajectory_processing::IterativeParabolicTimeParameterization iptp;
+  if (!iptp.computeTimeStamps(rt, vel_scale, acc_scale)) {
+    ROS_WARN("[PlanOnly][Cartesian] time parameterization failed.");
+    return false;
+  }
+  rt.getRobotTrajectoryMsg(trajectory_msg);
+
+  logPlannedEndpointEE(trajectory_msg, move_group.getRobotModel());
+  updateLastFromTrajectory(trajectory_msg);   //规划成功后记住末点
+  return true;
+}
+
 
 bool createManualPlan(const std::vector<double>& start_joints,
                       const std::vector<double>& end_joints,
@@ -224,30 +327,58 @@ bool createManualPlan(const std::vector<double>& start_joints,
     return true;
 }
 
+bool checkCollisionRisk(const moveit_msgs::RobotTrajectory& trajectory,
+                        const moveit::core::RobotModelConstPtr& robot_model)
+{
+    if (trajectory.joint_trajectory.points.empty()) return true; // 空轨迹当作危险
+
+    moveit::core::RobotState rs(robot_model);
+    const auto& jnames = trajectory.joint_trajectory.joint_names;
+
+    for (const auto& pt : trajectory.joint_trajectory.points) {
+        rs.setVariablePositions(jnames, pt.positions);
+        Eigen::Vector3d ee = rs.getGlobalLinkTransform("panda_hand_tcp").translation();
+
+        for (const auto& obs : g_obstacles) {
+            double d = (ee - obs).norm();
+            if (d < 0.20) {
+                return true; // 一旦小于0.2, 风险
+            }
+        }
+    }
+    return false; // 全程安全
+}
+
 bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, const geometry_msgs::Pose& final_target_pose)
 {   
     g_corrected_joints_received = false;
 
     // 步骤 1: 规划一次路径，以获取初始的、“有问题的”关节状态
-    move_group.setStartStateToCurrentState();
+    // move_group.setStartStateToCurrentState();
+    setStartFromLastOrCurrent(move_group); // 用“虚拟当前关节”做起点
     moveit::planning_interface::MoveGroupInterface::Plan initial_plan;
     move_group.setPoseTarget(final_target_pose);
 
     if (move_group.plan(initial_plan) != moveit::core::MoveItErrorCode::SUCCESS)
     {
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
+        // std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = -100; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
         return false;
     }
 
     if (initial_plan.trajectory_.joint_trajectory.points.empty()) {
-        std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
+        //std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = -100; g_reward_pub.publish(reward_msg);
         return false;
     }
 
     // MoveIt规划出的完整起始关节状态数组
-    std::vector<double> faulty_start_joints = initial_plan.trajectory_.joint_trajectory.points.front().positions;
+    std::vector<double> faulty_start_joints;
+    if (!g_last_joints.empty()) {
+      faulty_start_joints = g_last_joints;   
+    } else {
+      faulty_start_joints = initial_plan.trajectory_.joint_trajectory.points.front().positions;
+    }
     std::vector<double> final_joints = initial_plan.trajectory_.joint_trajectory.points.back().positions;
 
     {
@@ -320,24 +451,29 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     }
 
     // 步骤 5: 执行规划并计算奖励
-    moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
-    
+    //moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
+    logPlannedEndpointEE(final_plan.trajectory_, move_group.getRobotModel());
+    updateLastFromTrajectory(final_plan.trajectory_);
+
+    // 检查是否有小于0.2m的情况
+    bool collision_risk = checkCollisionRisk(final_plan.trajectory_,
+                                          move_group.getRobotModel());
+
     std_msgs::Bool result_msg;
-    result_msg.data = (result == moveit::core::MoveItErrorCode::SUCCESS);
-
-    std_msgs::Float32 reward_msg;
-    if (result_msg.data) {
-        reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
-    } else {
-        reward_msg.data = 0; // 对执行失败施加惩罚
-    }
-
-    // 将结果和奖励发布回RL智能体
-    g_reward_pub.publish(reward_msg);
+    result_msg.data = !collision_risk;   // 这里表示是否有风险
     g_step_result_pub.publish(result_msg);
 
-    ros::Duration(0.1).sleep();
-    return result_msg.data;
+    // 计算奖励
+    std_msgs::Float32 reward_msg;
+    reward_msg.data = computeTrajectoryReward(final_plan.trajectory_,
+                                          move_group.getRobotModel(),
+                                          final_target_pose);
+    g_reward_pub.publish(reward_msg);
+
+    return true;
+
+    
+
 }
 
 
@@ -358,7 +494,9 @@ void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
   target_pose_init.position.z = 1.5;
   move_group.setPoseTarget(target_pose_init);
 
-  move_group.move();
+  // move_group.move();
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  planToPoseOnly(move_group, target_pose_init, plan);  
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -376,17 +514,14 @@ void hoverPose(moveit::planning_interface::MoveGroupInterface& move_group)
 
   target_pose_hover.orientation = tf2::toMsg(orientation);
   
-  target_pose_hover.position.x = 0.502;  //Random points near. Python script: 1, sub joint_states, 
-  //                                                                          2, calculate real time EE locations
-  //                                                                          3, set a/multiple fixed points
-  //                                                                          4, design reward function: lower 20cm. 
-  //                                                                          5, define a new topic: output from RL
-  //                                                                          6, control code sub this new topic                       
+  target_pose_hover.position.x = 0.502;  
   target_pose_hover.position.y = -0.2;
   target_pose_hover.position.z = 1.5;
   move_group.setPoseTarget(target_pose_hover);
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  planToPoseOnly(move_group, target_pose_hover, plan);
+  // move_group.move();
 
-  move_group.move();
   
 }
 
@@ -395,7 +530,9 @@ void hoverPose(moveit::planning_interface::MoveGroupInterface& move_group)
 
 void pickPose(moveit::planning_interface::MoveGroupInterface& move_group_interface, std::string direction){
   moveit::planning_interface::MoveGroupInterface::Plan cartesianPlan;
-  move_group_interface.setStartStateToCurrentState();
+  //move_group_interface.setStartStateToCurrentState();
+  setStartFromLastOrCurrent(move_group_interface);
+
 
   move_group_interface.setMaxVelocityScalingFactor(1);
   move_group_interface.setMaxAccelerationScalingFactor(1);
@@ -440,10 +577,11 @@ void pickPose(moveit::planning_interface::MoveGroupInterface& move_group_interfa
   rt.getRobotTrajectoryMsg(trajectory_msg);
 
   cartesianPlan.trajectory_ = trajectory_msg;
- 
-  move_group_interface.execute(cartesianPlan);  
+    
+  // move_group_interface.execute(cartesianPlan);  
+  updateLastFromTrajectory(trajectory_msg);
+  logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
 
-  
 
 }
 
@@ -467,7 +605,10 @@ void hoverPlacePose(moveit::planning_interface::MoveGroupInterface& move_group)
   pose_hover_place.position.z = 1.5;
   move_group.setPoseTarget(pose_hover_place);
 
-  move_group.move();
+  // move_group.move();
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  planToPoseOnly(move_group, pose_hover_place, plan);
+
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -476,7 +617,9 @@ void hoverPlacePose(moveit::planning_interface::MoveGroupInterface& move_group)
 void PlacePose(moveit::planning_interface::MoveGroupInterface& move_group_interface, std::string direction)
 { 
   moveit::planning_interface::MoveGroupInterface::Plan cartesianPlan;
-  move_group_interface.setStartStateToCurrentState();
+  // move_group_interface.setStartStateToCurrentState();
+  setStartFromLastOrCurrent(move_group_interface);
+
 
   move_group_interface.setMaxVelocityScalingFactor(1);
   move_group_interface.setMaxAccelerationScalingFactor(1);
@@ -519,9 +662,11 @@ void PlacePose(moveit::planning_interface::MoveGroupInterface& move_group_interf
   rt.getRobotTrajectoryMsg(trajectory_msg);
 
   cartesianPlan.trajectory_ = trajectory_msg;
+  updateLastFromTrajectory(trajectory_msg);
+  logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
+
  
- 
-  move_group_interface.execute(cartesianPlan);  
+  // move_group_interface.execute(cartesianPlan);  
 
 }
 
@@ -726,81 +871,59 @@ int main(int argc, char** argv)
   // Set parameters for group like planner, speed, acceleration
   group_arm.setPlannerId("RRTConnect");
   group_arm.setMaxVelocityScalingFactor(1);
-  group_arm.setMaxAccelerationScalingFactor(3);
+  group_arm.setMaxAccelerationScalingFactor(1);
   group_arm.setNumPlanningAttempts(1);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 4000 ;i = i + 1)
+  // Add Objects to the envoirement
+  addCollisionObjects(planning_scene_interface);
+
+  //Create Cylinder
+  shape_msgs::SolidPrimitive primitive;
+
+  moveit_msgs::CollisionObject object_to_attach;
+  object_to_attach.id = "cylinder1";
+
+  shape_msgs::SolidPrimitive cylinder_primitive;
+  cylinder_primitive.type = primitive.CYLINDER;
+  cylinder_primitive.dimensions.resize(2);
+  cylinder_primitive.dimensions[primitive.CYLINDER_HEIGHT] = 0.145;
+  cylinder_primitive.dimensions[primitive.CYLINDER_RADIUS] = 0.013;
+  
+  // define the frame/pose for this cylinder
+  object_to_attach.header.frame_id = "panda_link0";
+  geometry_msgs::Pose grab_pose;
+  grab_pose.orientation.w = 1.0;
+  grab_pose.position.x = 0.5;
+  grab_pose.position.y = -0.2;
+  grab_pose.position.z = 0.0725;
+
+  // First, we add the object to the world (without using a vector)
+  object_to_attach.primitives.push_back(cylinder_primitive);
+  object_to_attach.primitive_poses.push_back(grab_pose);
+  object_to_attach.operation = object_to_attach.ADD;
+  planning_scene_interface.applyCollisionObject(object_to_attach);
+
+  // Wait a bit for ROS things to initialize
+  ros::WallDuration(1.0).sleep();
+
+  for (int i = 1; i < 100001 ;i = i + 1)
   { 
     generateAndPublishObstacles();
-    updateObstaclesInPlanningScene(planning_scene_interface);
-
-    // Add Objects to the envoirement
-    addCollisionObjects(planning_scene_interface);
-
-    //Create Cylinder
-    shape_msgs::SolidPrimitive primitive;
-
-    moveit_msgs::CollisionObject object_to_attach;
-    object_to_attach.id = "cylinder1";
-
-    shape_msgs::SolidPrimitive cylinder_primitive;
-    cylinder_primitive.type = primitive.CYLINDER;
-    cylinder_primitive.dimensions.resize(2);
-    cylinder_primitive.dimensions[primitive.CYLINDER_HEIGHT] = 0.145;
-    cylinder_primitive.dimensions[primitive.CYLINDER_RADIUS] = 0.013;
-    
-    // define the frame/pose for this cylinder
-    object_to_attach.header.frame_id = "panda_link0";
-    geometry_msgs::Pose grab_pose;
-    grab_pose.orientation.w = 1.0;
-    grab_pose.position.x = 0.5;
-    grab_pose.position.y = -0.2;
-    grab_pose.position.z = 0.0725;
-
-    // First, we add the object to the world (without using a vector)
-    object_to_attach.primitives.push_back(cylinder_primitive);
-    object_to_attach.primitive_poses.push_back(grab_pose);
-    object_to_attach.operation = object_to_attach.ADD;
-    planning_scene_interface.applyCollisionObject(object_to_attach);
-
-    // Wait a bit for ROS things to initialize
-    ros::WallDuration(1.0).sleep();
+    // updateObstaclesInPlanningScene(planning_scene_interface);
 
     std_msgs::Int32 state;
     state.data = 1;
     pose_state_pub.publish(state);
+
     hoverPose(group_arm);
     ROS_INFO("Task 1: Hover Pose done");
-    // { 
-    //   geometry_msgs::Pose target_pose_hover;
-    //   tf2::Quaternion orientation;
-    //   orientation.setRPY(-tau/2, 0, -tau/8);
-    //   target_pose_hover.orientation = tf2::toMsg(orientation);
-    //   target_pose_hover.position.x = 0.502;
-    //   target_pose_hover.position.y = -0.2;
-    //   target_pose_hover.position.z = 1.5;
-      
-    //   performRLStep(group_arm, target_pose_hover);
-    //   ROS_INFO("Task 1: Hover Pose done.");
-    // }
     
     state.data = 2;
     pose_state_pub.publish(state);
     pickPose(group_arm , "down");
     ROS_INFO("Task 2: Pick Pose done");
 
-    // geometry_msgs::Pose state2_pose = group_arm.getCurrentPose().pose;
-    // ROS_INFO("Saved return position after Task 2.");
-
-    // state.data = 2;
-    // pose_state_pub.publish(state);
-    // {
-    //   geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-    //   original_target.position.z -= 0.26; 
-    //   performRLStep(group_arm, original_target);
-    //   ROS_INFO("Task 2: Pick Pose done");
-    // }
     
     // state.data = 3;
     // pose_state_pub.publish(state);
@@ -883,21 +1006,7 @@ int main(int argc, char** argv)
     pose_state_pub.publish(state);
     initPose(group_arm);
     ROS_INFO("Task 9: Init Pose done.");
-   
-    // {
-    //     geometry_msgs::Pose target_pose_init;
-    //     tf2::Quaternion orientation;
-    //     orientation.setRPY(-tau/2, 0, -tau/8);
-    //     target_pose_init.orientation = tf2::toMsg(orientation);
-    //     target_pose_init.position.x = 0.5;
-    //     target_pose_init.position.y = 0.0;
-    //     target_pose_init.position.z = 1.5;
 
-    //     performRLStep(group_arm, target_pose_init);
-    //     ROS_INFO("Task 9: Init Pose done.");
-    // }
-    
-    
     state.data = 404;
     pose_state_pub.publish(state);
     // ros::WallDuration(2.0).sleep();

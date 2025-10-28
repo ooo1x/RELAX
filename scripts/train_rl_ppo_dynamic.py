@@ -10,7 +10,7 @@ from stable_baselines3.common.vec_env import VecNormalize
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback
 from stable_baselines3.common.logger import configure
 
-from franka_rl_env import FrankaRLEnv
+from franka_rl_env_dynamic import FrankaRLEnv
 from std_msgs.msg import Int32
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

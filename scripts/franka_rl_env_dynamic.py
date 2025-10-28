@@ -35,7 +35,10 @@ class FrankaRLEnv(Env):
         #把 action_space 设为 7 维（每个关节的绝对目标值）：
         self.joint_lower = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973], dtype=np.float32)
         self.joint_upper = np.array([ 2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973], dtype=np.float32)
-        self.action_space = spaces.Box(low=self.joint_lower, high=self.joint_upper, dtype=np.float32)
+        #self.action_space = spaces.Box(low=self.joint_lower, high=self.joint_upper, dtype=np.float32)
+        joint_4_lower = self.joint_lower[3]
+        joint_4_upper = self.joint_upper[3]
+        self.action_space = spaces.Box(low=joint_4_lower, high=joint_4_upper, shape=(1,), dtype=np.float32)
 
         self.request_event = threading.Event()
         self.step_result_event = threading.Event() 
@@ -163,7 +166,7 @@ class FrankaRLEnv(Env):
 
     def _compute_reward(self, planning_failed, cpp_provided_reward):
 
-        PENALTY_PLANNING_FAILURE = -200.0
+        # PENALTY_PLANNING_FAILURE = -200.0
         
         # if planning_failed:
         #     rospy.logwarn("Planning failed. Applying penalty.")
@@ -207,19 +210,24 @@ class FrankaRLEnv(Env):
                 rospy.logwarn("Shutdown signal received while waiting for request. Terminating episode.")
                 return np.zeros(self.observation_space.shape), 0.0, True, False, {}
 
-        action = np.asarray(action, dtype=np.float32)
-        action = np.clip(action, self.joint_lower, self.joint_upper)
+        #action = np.asarray(action, dtype=np.float32)
+        #action = np.clip(action, self.joint_lower, self.joint_upper)
 
-        mask = self.faulty_indicator.astype(bool)
-        current_joint_states = self.full_observation[:self.num_joints]
+        # --- 取当前关节 ---
+        current_joint_states = self.full_observation[:self.num_joints]  # shape (7,)
+
+        # --- 应用动作到 j4（绝对值方案）---
+        a = float(action[0])  # 1维动作
+        a = np.clip(a, self.joint_lower[3], self.joint_upper[3])  # 用 j4 的上下界 clip
 
         corrected = current_joint_states.copy()
-        corrected[mask] = action[mask]
+        corrected[3] = a  # 只改 j4，其余 6 个不变
 
+        # --- 再对整条7维做一次界限裁剪（防御性）---
         corrected = np.clip(corrected, self.joint_lower, self.joint_upper)
 
-        msg = Float32MultiArray(data=corrected.tolist())
-        self.corrected_start_pub.publish(msg)
+        # --- 发布完整7维 ---
+        self.corrected_start_pub.publish(Float32MultiArray(data=corrected.tolist()))
                 
         if not self.step_result_event.wait(timeout=10.0):
             rospy.logerr("Timeout! C++ did not return a step result in time.")

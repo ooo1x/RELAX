@@ -99,13 +99,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train a DDPG agent for the Franka robot.")
     parser.add_argument("--new", action="store_true", help="Force a new training run, ignoring all existing models.")
-    parser.add_argument("--continue_latest", action="store_true", help="Continue training from the latest completed run's final model.")
-    parser.add_argument("--load_checkpoint_run", type=str, metavar="RUN_ID", help="Load the latest checkpoint from a specific run ID (e.g., 20250723-173706).")
+    parser.add_argument("--c", action="store_true", help="Continue training from the latest completed run's final model.")
+    parser.add_argument("--lck", type=str, metavar="RUN_ID", help="Load the latest checkpoint from a specific run ID (e.g., 20250723-173706).")
     args = parser.parse_args()
 
     # --- Configuration ---
     GAMMA = 0.99
-    MAX_CPP_EPISODES = 3998   # Set the total number of episodes for the C++ node to run
+    MAX_CPP_EPISODES = 10000   # Set the total number of episodes for the C++ node to run
     
     # --- Variable Initialization ---
     load_model_path = None
@@ -120,7 +120,7 @@ if __name__ == "__main__":
     if args.new:
         rospy.loginfo("Mode: Starting a completely new training run.")
     
-    elif args.continue_latest:
+    elif args.c:
         rospy.loginfo("Mode: Continuing from the latest completed run.")
         latest_run = find_latest_run_dir(MODELS_DIR)
         if latest_run:
@@ -128,12 +128,13 @@ if __name__ == "__main__":
             load_model_path = os.path.join(MODELS_DIR, run_id, "ddpg_franka_model.zip")
             load_stats_path = os.path.join(MODELS_DIR, run_id, "vec_normalize_stats.pkl")
             rospy.loginfo(f"Found latest run '{run_id}'. Will load final model and stats.")
+            is_resuming_from_checkpoint = True
         else:
             rospy.logwarn("No completed runs found to continue from. Starting a new run instead.")
 
-    elif args.load_checkpoint_run:
-        rospy.loginfo(f"Mode: Loading latest checkpoint from run '{args.load_checkpoint_run}'.")
-        run_id = args.load_checkpoint_run # Reuse the old run_id
+    elif args.lck:
+        rospy.loginfo(f"Mode: Loading latest checkpoint from run '{args.lck}'.")
+        run_id = args.lck # Reuse the old run_id
         checkpoint_folder = os.path.join(CHECKPOINTS_DIR, run_id)
         load_model_path, load_stats_path = find_latest_checkpoint(checkpoint_folder)
         if load_model_path:
@@ -179,7 +180,7 @@ if __name__ == "__main__":
         action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
         model = DDPG("MlpPolicy", norm_vec_env, action_noise=action_noise, verbose=1, 
                      gamma=GAMMA, tensorboard_log=TENSORBOARD_LOG_DIR,
-                     buffer_size=100000, learning_starts=1000)
+                     buffer_size=100000, learning_starts=3000)
 
     # --- Setup Callbacks ---
     ros_tracker = RosStateTracker()
