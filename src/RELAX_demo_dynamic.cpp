@@ -36,7 +36,6 @@ const double tau = 2 * M_PI;
 bool g_python_is_ready = false;
 bool g_is_recording = false; 
 ros::Publisher g_step_result_pub;          // 发布执行成功/失败结果给RL
-ros::Publisher g_pose_state_pub;           // 发布机器人的当前位姿状态
 double g_current_panda_joints = 0.0;
 std::vector<sensor_msgs::JointState> g_recorded_joint_states;
 ros::Publisher g_joint_trajectory_command_pub;
@@ -395,7 +394,7 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
 
 
     // 步骤 2: 将完整的观察（关节状态 + 障碍物位置）发送给Python
-    std_msgs::Float32MultiArray observation_msg; // 重命名变量以更清晰地表示其内容
+    std_msgs::Float32MultiArray observation_msg; 
 
     for (const auto& joint_value : faulty_start_joints)
     {
