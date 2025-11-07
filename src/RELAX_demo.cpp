@@ -313,7 +313,7 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
         std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
         return false;
     }
-    // appendPlanToCsv(g_csv_file_j4, "corrected_plan", final_plan.trajectory_);
+    appendPlanToCsv(g_csv_file_j4, "corrected_plan", final_plan.trajectory_);
 
     std_msgs::Float32 reward_msg;
     reward_msg.data = computeTrajectoryReward(final_plan.trajectory_, move_group.getRobotModel(), corrected_joints, final_target_pose);
@@ -683,9 +683,9 @@ int main(int argc, char** argv)
 {
   ros::init(argc, argv, "own_pick_place_V4");
   ros::NodeHandle nh;
-  // const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
-  // g_csv_file_j4 = std::string(home) + "/rl_joint4_logs.csv";
-  // ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
+  const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
+  g_csv_file_j4 = std::string(home) + "/rl_joint4_logs.csv";
+  ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
 
   //Get information about robot state
   ros::AsyncSpinner spinner(2);
@@ -723,7 +723,7 @@ int main(int argc, char** argv)
   group_arm.setNumPlanningAttempts(2);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 1000 ;i = i + 1)
+  for (int i = 1; i < 2 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
