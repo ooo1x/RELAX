@@ -906,7 +906,7 @@ int main(int argc, char** argv)
   // Wait a bit for ROS things to initialize
   ros::WallDuration(1.0).sleep();
 
-  for (int i = 1; i < 100001 ;i = i + 1)
+  for (int i = 1; i < 51 ;i = i + 1)
   { 
     generateAndPublishObstacles();
     // updateObstaclesInPlanningScene(planning_scene_interface);
@@ -945,7 +945,9 @@ int main(int argc, char** argv)
       {
         geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
         original_target.position.z += 0.26; 
-        performRLStep(group_arm, original_target);
+        //performRLStep(group_arm, original_target);
+        pickPose(group_arm , "up");
+
         ROS_INFO("Task 4: Lift up done");
         }
 
@@ -959,7 +961,9 @@ int main(int argc, char** argv)
         original_target.position.x = 0.502; 
         original_target.position.y = 0.2;
         original_target.position.z = 1.5;
-        performRLStep(group_arm, original_target);
+        //performRLStep(group_arm, original_target);
+            hoverPlacePose(group_arm);
+
         ROS_INFO("Task 5: Hover Place Pose done");
      }
 

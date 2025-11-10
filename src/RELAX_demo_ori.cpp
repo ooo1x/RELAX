@@ -22,6 +22,19 @@
 // The circle constant tau = 2*pi. One tau is one rotation in radians.
 const double tau = 2 * M_PI;
 
+std::mt19937& globalRng()
+{
+  static std::random_device rd;
+  static std::mt19937 gen(rd());
+  return gen;
+}
+
+double randomOffset(double range)
+{
+  std::uniform_real_distribution<double> dist(-range, range);
+  return dist(globalRng());
+}
+
 
 //Functions for Moving and grasping with robot
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -52,28 +65,28 @@ void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
 
 void hoverPose(moveit::planning_interface::MoveGroupInterface& move_group)
 { 
-  // We can plan a motion for this group to a desired pose for the
-  // end-effector.
   geometry_msgs::Pose target_pose_hover;
 
-  //Convert Orienation from RPY to Quaternion
   tf2::Quaternion orientation;
   orientation.setRPY(-tau/2, 0, -tau/8);
-
   target_pose_hover.orientation = tf2::toMsg(orientation);
   
-  target_pose_hover.position.x = 0.502;  //Random points near. Python script: 1, sub joint_states, 
-  //                                                                          2, calculate real time EE locations
-  //                                                                          3, set a/multiple fixed points
-  //                                                                          4, design reward function: lower 20cm. 
-  //                                                                          5, define a new topic: output from RL
-  //                                                                          6, control code sub this new topic                       
-  target_pose_hover.position.y = -0.2;
-  target_pose_hover.position.z = 1.5;
-  move_group.setPoseTarget(target_pose_hover);
+  const double cx = 0.502;
+  const double cy = -0.2;
+  const double cz = 1.5;
+  const double r_xy = 0.05; // 5cm
 
+  target_pose_hover.position.x = cx + randomOffset(r_xy);
+  target_pose_hover.position.y = cy + randomOffset(r_xy);
+  target_pose_hover.position.z = cz;
+
+  move_group.setPoseTarget(target_pose_hover);
   move_group.move();
-  
+
+  ROS_INFO("Hover Pose (randomized) at x=%.3f, y=%.3f, z=%.3f",
+           target_pose_hover.position.x,
+           target_pose_hover.position.y,
+           target_pose_hover.position.z);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -138,22 +151,28 @@ void pickPose(moveit::planning_interface::MoveGroupInterface& move_group_interfa
 
 void hoverPlacePose(moveit::planning_interface::MoveGroupInterface& move_group)
 { 
-  // We can plan a motion for this group to a desired pose for the
-  // end-effector.
   geometry_msgs::Pose pose_hover_place;
 
-  //Convert Orienation from RPY to Quaternion
   tf2::Quaternion orientation;
   orientation.setRPY(-tau/2, 0, -tau/8);
-
   pose_hover_place.orientation = tf2::toMsg(orientation);
   
-  pose_hover_place.position.x = 0.502;
-  pose_hover_place.position.y = 0.2;
-  pose_hover_place.position.z = 1.5;
-  move_group.setPoseTarget(pose_hover_place);
+  const double cx = 0.502;
+  const double cy = 0.2;
+  const double cz = 1.5;
+  const double r_xy = 0.05; // 5cm
 
+  pose_hover_place.position.x = cx + randomOffset(r_xy);
+  pose_hover_place.position.y = cy + randomOffset(r_xy);
+  pose_hover_place.position.z = cz;
+
+  move_group.setPoseTarget(pose_hover_place);
   move_group.move();
+
+  ROS_INFO("Hover Place Pose (randomized) at x=%.3f, y=%.3f, z=%.3f",
+           pose_hover_place.position.x,
+           pose_hover_place.position.y,
+           pose_hover_place.position.z);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -518,13 +537,13 @@ int main(int argc, char** argv)
     // ROS_WARN("--------------------");
     //ros::WallDuration(3.0).sleep();
 
-    state.data = 6;
-    pose_state_pub.publish(state);
+    // state.data = 6;
+    // pose_state_pub.publish(state);
 
-    // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    PlacePose(group_arm , "down");
-    ROS_INFO("Task 6: Place Pose (down) done.");
+    // // ROS_WARN("hover start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // PlacePose(group_arm , "down");
+    // ROS_INFO("Task 6: Place Pose (down) done.");
     // // ROS_WARN("hover end at:%.8f",ros::Time::now().toSec());
     // // ROS_WARN("--------------------");
     // //ros::WallDuration(3.0).sleep();
@@ -542,14 +561,14 @@ int main(int argc, char** argv)
 
     // group_arm.detachObject(object_to_attach.id);
 
-    state.data = 8;
-    pose_state_pub.publish(state);
+    // state.data = 8;
+    // pose_state_pub.publish(state);
 
-    // Move up and to init pose
-    // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
-    // ROS_WARN("--------------------");
-    PlacePose(group_arm , "up");
-    ROS_INFO("Task 8: Place Pose (up) done.");
+    // // Move up and to init pose
+    // // ROS_WARN("Placeup start at:%.8f",ros::Time::now().toSec());
+    // // ROS_WARN("--------------------");
+    // PlacePose(group_arm , "up");
+    // ROS_INFO("Task 8: Place Pose (up) done.");
     // // ROS_WARN("Placeup end at:%.8f",ros::Time::now().toSec());
     // // ROS_WARN("--------------------");
     // //ros::WallDuration(3.0).sleep();

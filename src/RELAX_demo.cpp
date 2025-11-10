@@ -723,7 +723,7 @@ int main(int argc, char** argv)
   group_arm.setNumPlanningAttempts(2);
   group_arm.setGoalJointTolerance(0.01);
 
-  for (int i = 1; i < 2 ;i = i + 1)
+  for (int i = 1; i < 2000 ;i = i + 1)
   { 
         
     // Add Objects to the envoirement
