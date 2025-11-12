@@ -219,10 +219,10 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
     // --- 1. 对灾难性失败的惩罚 ---
     if (trajectory.joint_trajectory.points.empty())
     {
-        return -100.0f; // 惩罚无法生成规划的起点
+        return -5; // 惩罚无法生成规划的起点
     }
 
-    // --- 2. 计算轨迹的安全性（核心稠密奖励）---
+    // --- 2. 计算轨迹的安全性---
     double min_dist_trajectory = std::numeric_limits<double>::infinity();
     moveit::core::RobotState rs(robot_model);
     const auto& jnames = trajectory.joint_trajectory.joint_names;
@@ -239,6 +239,7 @@ float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
                 min_dist_trajectory = d;
             }
         }
+
     }
 
     // --- 3. 对碰撞风险的惩罚 ---
@@ -421,13 +422,13 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     if (move_group.plan(initial_plan) != moveit::core::MoveItErrorCode::SUCCESS)
     {
         // std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -100; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
+        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg); // 对规划失败施加惩罚
         return false;
     }
 
     if (initial_plan.trajectory_.joint_trajectory.points.empty()) {
         //std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = -100; g_reward_pub.publish(reward_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
         return false;
     }
 
@@ -506,7 +507,7 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     moveit::planning_interface::MoveGroupInterface::Plan final_plan;
     if (!createManualPlan(corrected_joints, final_joints, final_plan, move_group, 2.0)) {
         std_msgs::Bool result_msg; result_msg.data = false; g_step_result_pub.publish(result_msg);
-        std_msgs::Float32 reward_msg; reward_msg.data = 0; g_reward_pub.publish(reward_msg);
+        std_msgs::Float32 reward_msg; reward_msg.data = -5; g_reward_pub.publish(reward_msg);
         return false;
     }
 
@@ -908,7 +909,7 @@ int main(int argc, char** argv)
 
   ros::Publisher start_signal_pub = nh.advertise<std_msgs::Bool>("/start_signal", 1, true);
   ros::Subscriber python_ready_sub = nh.subscribe("/rl/ready_for_next", 1, pythonReadyCallback);
-  ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("pose_state", 1000); 
+  ros::Publisher pose_state_pub = nh.advertise<std_msgs::Int32>("/pose_state", 1000);
   ros::Publisher episode_pub = nh.advertise<std_msgs::Int32>("/episode", 10);
   g_step_result_pub = nh.advertise<std_msgs::Bool>("/rl/step_result", 10);
   g_joint_trajectory_command_pub = nh.advertise<trajectory_msgs::JointTrajectory>("/panda_arm_controller/command", 1);
@@ -975,7 +976,7 @@ int main(int argc, char** argv)
   for (int i = 1; i < 51 ;i = i + 1)
   { 
     generateAndPublishObstacles();
-   // updateObstaclesInPlanningScene(planning_scene_interface);
+    updateObstaclesInPlanningScene(planning_scene_interface);
 
     std_msgs::Int32 state;
     state.data = 1;
@@ -1008,80 +1009,80 @@ int main(int argc, char** argv)
     // {
       state.data = 4;
       pose_state_pub.publish(state);
-      {
-        geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
-        original_target.position.z += 0.26; 
-        performRLStep(group_arm, original_target);
-        //pickPose(group_arm , "up");
+      // {
+      //   geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
+      //   original_target.position.z += 0.26; 
+      //   performRLStep(group_arm, original_target);
+      //   //pickPose(group_arm , "up");
 
-        ROS_INFO("Task 4: Lift up done");
-        }
+      //   ROS_INFO("Task 4: Lift up done");
+      //   }
 
-      //       {
-      //   geometry_msgs::Pose target_pose = group_arm.getCurrentPose().pose;
+            {
+        geometry_msgs::Pose target_pose = group_arm.getCurrentPose().pose;
 
-      //   const double xy_radius = 0.05;
+        const double xy_radius = 0.05;
 
-      //   std::random_device rd;
-      //   std::mt19937 gen(rd());
-      //   std::uniform_real_distribution<> distrib(-xy_radius, xy_radius);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> distrib(-xy_radius, xy_radius);
 
-      //   target_pose.position.x += distrib(gen);
-      //   target_pose.position.y += distrib(gen);
-      //   target_pose.position.z += 0.26; 
+        target_pose.position.x += distrib(gen);
+        target_pose.position.y += distrib(gen);
+        target_pose.position.z += 0.26; 
 
-      //   performRLStep(group_arm, target_pose);
+        performRLStep(group_arm, target_pose);
         
-      //   ROS_INFO("Task 4: Lift up done at [x: %f, y: %f, z: %f]",
-      //            target_pose.position.x,
-      //            target_pose.position.y,
-      //            target_pose.position.z);
-      // }
+        ROS_INFO("Task 4: Lift up done at [x: %f, y: %f, z: %f]",
+                 target_pose.position.x,
+                 target_pose.position.y,
+                 target_pose.position.z);
+      }
 
       state.data = 5;
       pose_state_pub.publish(state);
-      {
-        geometry_msgs::Pose original_target;
-        tf2::Quaternion orientation;
-        orientation.setRPY(-tau/2, 0, -tau/8);
-        original_target.orientation = tf2::toMsg(orientation);
-        original_target.position.x = 0.502; 
-        original_target.position.y = 0.2;
-        original_target.position.z = 1.5;
-        performRLStep(group_arm, original_target);
-            // hoverPlacePose(group_arm);
-
-        ROS_INFO("Task 5: Hover Place Pose done");
-     }
-
     //   {
-    //     geometry_msgs::Pose target_pose;
+    //     geometry_msgs::Pose original_target;
     //     tf2::Quaternion orientation;
     //     orientation.setRPY(-tau/2, 0, -tau/8);
-    //     target_pose.orientation = tf2::toMsg(orientation);
+    //     original_target.orientation = tf2::toMsg(orientation);
+    //     original_target.position.x = 0.502; 
+    //     original_target.position.y = 0.2;
+    //     original_target.position.z = 1.5;
+    //     performRLStep(group_arm, original_target);
+    //         // hoverPlacePose(group_arm);
 
-    //     const double center_x = 0.502;
-    //     const double center_y = 0.2;
-    //     const double center_z = 1.5;
-
-    //     const double radius = 0.05;
-
-    //     std::random_device rd;
-    //     std::mt19937 gen(rd());
-    //     std::uniform_real_distribution<> distrib(-radius, radius);
-
-    //     target_pose.position.x = center_x + distrib(gen); 
-    //     target_pose.position.y = center_y + distrib(gen); 
-    //     target_pose.position.z = center_z;                
-
-    //     performRLStep(group_arm, target_pose);
-    //     //hoverPlacePose(group_arm);
-
-    //     ROS_INFO("Task 5: Hover Place Pose done at [x: %f, y: %f, z: %f]",
-    //              target_pose.position.x,
-    //              target_pose.position.y,
-    //              target_pose.position.z);
+    //     ROS_INFO("Task 5: Hover Place Pose done");
     //  }
+
+      {
+        geometry_msgs::Pose target_pose;
+        tf2::Quaternion orientation;
+        orientation.setRPY(-tau/2, 0, -tau/8);
+        target_pose.orientation = tf2::toMsg(orientation);
+
+        const double center_x = 0.502;
+        const double center_y = 0.2;
+        const double center_z = 1.5;
+
+        const double radius = 0.05;
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<> distrib(-radius, radius);
+
+        target_pose.position.x = center_x + distrib(gen); 
+        target_pose.position.y = center_y + distrib(gen); 
+        target_pose.position.z = center_z;                
+
+        performRLStep(group_arm, target_pose);
+        //hoverPlacePose(group_arm);
+
+        ROS_INFO("Task 5: Hover Place Pose done at [x: %f, y: %f, z: %f]",
+                 target_pose.position.x,
+                 target_pose.position.y,
+                 target_pose.position.z);
+     }
 
     //   ROS_INFO("Returning to state 2 position...");
     //   group_arm.setPoseTarget(state2_pose);

@@ -67,7 +67,7 @@ class FrankaRLEnv(Env):
         rospy.Subscriber('/rl/faulty_joint_states', Float32MultiArray, self._observation_callback, queue_size=1)
         rospy.Subscriber('/rl/step_result', Bool, self._step_result_callback, queue_size=10)
         rospy.Subscriber('/rl/trajectory_reward', Float32, self._reward_callback, queue_size=10)
-        rospy.Subscriber('pose_state', Int32, self._pose_state_callback, queue_size=10)
+        rospy.Subscriber('/pose_state', Int32, self._pose_state_callback, queue_size=10)
         rospy.loginfo("FrankaRLEnv initialized successfully.")
    
     def _reward_callback(self, msg: Float32):

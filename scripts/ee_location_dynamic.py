@@ -12,6 +12,9 @@ from gazebo_msgs.srv import SetModelState
 from gazebo_msgs.msg import ModelState
 
 obstacles = []
+current_pose_state = -1
+current_episode = -1
+
 def obstacle_callback(msg):
     global obstacles
     try:
@@ -20,11 +23,21 @@ def obstacle_callback(msg):
     except ValueError as e:
         rospy.logwarn(f"No Obstacles: {e}")
 
+def pose_state_callback(msg):
+    global current_pose_state
+    current_pose_state = int(msg.data)
+
 def calculate_distance(point1, point2):
     distance = math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2 + (point1[2] - point2[2])**2)
     return distance
 
 def joint_state_callback(joint_state_msg):
+    global current_pose_state
+    if current_pose_state == -1:
+        rospy.logwarn("pose_state not received yet.")
+        return
+    if current_pose_state not in (4, 5):
+        return
 
     # model_state = ModelState()
     # model_state.model_name = 'workpiece_clone'
@@ -102,6 +115,7 @@ if __name__ == '__main__':
     # distance1_pub = rospy.Publisher('/distance_between_end_effector_and_hand1', Float32, queue_size=100)
     # distance2_pub = rospy.Publisher('/distance_between_end_effector_and_hand2', Float32, queue_size=100)
     # safety_violation_pub = rospy.Publisher('/safety_violation', Int32, queue_size=100)
+    pose_state_sub = rospy.Subscriber('/pose_state', Int32, pose_state_callback)
     obstacle_sub = rospy.Subscriber('/obstacle_positions', Float32MultiArray, obstacle_callback)
    
     rospy.spin()
