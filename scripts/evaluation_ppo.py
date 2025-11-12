@@ -58,7 +58,7 @@ if __name__ == "__main__":
     rospy.loginfo(f"[EVAL] Loading trained model from: {model_path}")
     model = PPO.load(model_path, env=eval_env)
 
-    num_eval_episodes = 100
+    num_eval_episodes = 50
     rospy.loginfo(f"[EVAL] Starting evaluation for {num_eval_episodes} episodes...")
     
     all_rewards = []

@@ -82,11 +82,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a PPO agent for the Franka robot.") 
     parser.add_argument("--new", action="store_true", help="Force a new training run, ignoring all existing models.")
     parser.add_argument("--cl", action="store_true", help="Continue training from the latest completed run's final model.")
-    parser.add_argument("--lc", type=str, metavar="RUN_ID", help="Load the latest checkpoint from a specific run ID (e.g., 20250723-173706).")
+    parser.add_argument("--lcr", type=str, metavar="RUN_ID", help="Load the latest checkpoint from a specific run ID (e.g., 20250723-173706).")
     args = parser.parse_args()
 
     # --- Configuration ---
-    MAX_CPP_EPISODES = 100000
+    MAX_CPP_EPISODES = 5000
     
     # --- Variable Initialization (Unchanged) ---
     load_model_path = None
@@ -107,9 +107,9 @@ if __name__ == "__main__":
             rospy.loginfo(f"Found latest run '{run_id}'. Will load final model and stats.")
         else:
             rospy.logwarn("No completed runs found to continue from. Starting a new run instead.")
-    elif args.lc:
-        rospy.loginfo(f"Mode: Loading latest checkpoint from run '{args.load_checkpoint_run}'.")
-        run_id = args.load_checkpoint_run
+    elif args.lcr:
+        rospy.loginfo(f"Mode: Loading latest checkpoint from run '{args.lcr}'.")
+        run_id = args.lcr
         checkpoint_folder = os.path.join(CHECKPOINTS_DIR, run_id)
         load_model_path, load_stats_path = find_latest_checkpoint(checkpoint_folder)
         if load_model_path:

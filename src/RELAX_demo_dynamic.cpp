@@ -493,9 +493,9 @@ void initPose(moveit::planning_interface::MoveGroupInterface& move_group)
   target_pose_init.position.z = 1.5;
   move_group.setPoseTarget(target_pose_init);
 
-  // move_group.move();
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  planToPoseOnly(move_group, target_pose_init, plan);  
+  move_group.move();
+  // moveit::planning_interface::MoveGroupInterface::Plan plan;
+  // planToPoseOnly(move_group, target_pose_init, plan);  
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -517,9 +517,9 @@ void hoverPose(moveit::planning_interface::MoveGroupInterface& move_group)
   target_pose_hover.position.y = -0.2;
   target_pose_hover.position.z = 1.5;
   move_group.setPoseTarget(target_pose_hover);
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  planToPoseOnly(move_group, target_pose_hover, plan);
-  // move_group.move();
+  // moveit::planning_interface::MoveGroupInterface::Plan plan;
+  // planToPoseOnly(move_group, target_pose_hover, plan);
+  move_group.move();
 
   
 }
@@ -577,9 +577,9 @@ void pickPose(moveit::planning_interface::MoveGroupInterface& move_group_interfa
 
   cartesianPlan.trajectory_ = trajectory_msg;
     
-  // move_group_interface.execute(cartesianPlan);  
-  updateLastFromTrajectory(trajectory_msg);
-  logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
+  move_group_interface.execute(cartesianPlan);  
+  // updateLastFromTrajectory(trajectory_msg);
+  // logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
 
 
 }
@@ -604,9 +604,9 @@ void hoverPlacePose(moveit::planning_interface::MoveGroupInterface& move_group)
   pose_hover_place.position.z = 1.5;
   move_group.setPoseTarget(pose_hover_place);
 
-  // move_group.move();
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  planToPoseOnly(move_group, pose_hover_place, plan);
+  move_group.move();
+  // moveit::planning_interface::MoveGroupInterface::Plan plan;
+  // planToPoseOnly(move_group, pose_hover_place, plan);
 
 }
 
@@ -661,11 +661,11 @@ void PlacePose(moveit::planning_interface::MoveGroupInterface& move_group_interf
   rt.getRobotTrajectoryMsg(trajectory_msg);
 
   cartesianPlan.trajectory_ = trajectory_msg;
-  updateLastFromTrajectory(trajectory_msg);
-  logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
+  // updateLastFromTrajectory(trajectory_msg);
+  // logPlannedEndpointEE(trajectory_msg, move_group_interface.getRobotModel());
 
  
-  // move_group_interface.execute(cartesianPlan);  
+  move_group_interface.execute(cartesianPlan);  
 
 }
 
@@ -909,7 +909,7 @@ int main(int argc, char** argv)
   for (int i = 1; i < 51 ;i = i + 1)
   { 
     generateAndPublishObstacles();
-    // updateObstaclesInPlanningScene(planning_scene_interface);
+    updateObstaclesInPlanningScene(planning_scene_interface);
 
     std_msgs::Int32 state;
     state.data = 1;
@@ -945,11 +945,32 @@ int main(int argc, char** argv)
       {
         geometry_msgs::Pose original_target = group_arm.getCurrentPose().pose;
         original_target.position.z += 0.26; 
-        //performRLStep(group_arm, original_target);
-        pickPose(group_arm , "up");
+        performRLStep(group_arm, original_target);
+        //pickPose(group_arm , "up");
 
         ROS_INFO("Task 4: Lift up done");
         }
+
+      //       {
+      //   geometry_msgs::Pose target_pose = group_arm.getCurrentPose().pose;
+
+      //   const double xy_radius = 0.05;
+
+      //   std::random_device rd;
+      //   std::mt19937 gen(rd());
+      //   std::uniform_real_distribution<> distrib(-xy_radius, xy_radius);
+
+      //   target_pose.position.x += distrib(gen);
+      //   target_pose.position.y += distrib(gen);
+      //   target_pose.position.z += 0.26; 
+
+      //   performRLStep(group_arm, target_pose);
+        
+      //   ROS_INFO("Task 4: Lift up done at [x: %f, y: %f, z: %f]",
+      //            target_pose.position.x,
+      //            target_pose.position.y,
+      //            target_pose.position.z);
+      // }
 
       state.data = 5;
       pose_state_pub.publish(state);
@@ -961,11 +982,40 @@ int main(int argc, char** argv)
         original_target.position.x = 0.502; 
         original_target.position.y = 0.2;
         original_target.position.z = 1.5;
-        //performRLStep(group_arm, original_target);
-            hoverPlacePose(group_arm);
+        performRLStep(group_arm, original_target);
+            // hoverPlacePose(group_arm);
 
         ROS_INFO("Task 5: Hover Place Pose done");
      }
+
+    //   {
+    //     geometry_msgs::Pose target_pose;
+    //     tf2::Quaternion orientation;
+    //     orientation.setRPY(-tau/2, 0, -tau/8);
+    //     target_pose.orientation = tf2::toMsg(orientation);
+
+    //     const double center_x = 0.502;
+    //     const double center_y = 0.2;
+    //     const double center_z = 1.5;
+
+    //     const double radius = 0.05;
+
+    //     std::random_device rd;
+    //     std::mt19937 gen(rd());
+    //     std::uniform_real_distribution<> distrib(-radius, radius);
+
+    //     target_pose.position.x = center_x + distrib(gen); 
+    //     target_pose.position.y = center_y + distrib(gen); 
+    //     target_pose.position.z = center_z;                
+
+    //     performRLStep(group_arm, target_pose);
+    //     //hoverPlacePose(group_arm);
+
+    //     ROS_INFO("Task 5: Hover Place Pose done at [x: %f, y: %f, z: %f]",
+    //              target_pose.position.x,
+    //              target_pose.position.y,
+    //              target_pose.position.z);
+    //  }
 
     //   ROS_INFO("Returning to state 2 position...");
     //   group_arm.setPoseTarget(state2_pose);

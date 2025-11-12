@@ -683,9 +683,9 @@ int main(int argc, char** argv)
 {
   ros::init(argc, argv, "own_pick_place_V4");
   ros::NodeHandle nh;
-  // const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
-  // g_csv_file_j4 = std::string(home) + "/rl_joint4_logs.csv";
-  // ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
+  const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
+  g_csv_file_j4 = std::string(home) + "/rl_joint4_logs_arm.csv";
+  ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
 
   //Get information about robot state
   ros::AsyncSpinner spinner(2);
