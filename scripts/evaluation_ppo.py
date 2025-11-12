@@ -7,7 +7,7 @@ import rospy
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
-from franka_rl_env import FrankaRLEnv
+from franka_rl_env_dynamic import FrankaRLEnv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXPERIMENTS_DIR = os.path.join(BASE_DIR, "experiments", "PPO") 
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     rospy.loginfo(f"[EVAL] Using run ID: {run_id_to_load}")
 
     model_load_dir = os.path.join(MODELS_BASE_DIR, run_id_to_load)
-    model_path = os.path.join(model_load_dir, "PPO_franka_model.zip")
+    model_path = os.path.join(model_load_dir, "ppo_franka_model.zip")
     stats_path = os.path.join(model_load_dir, "vec_normalize_stats.pkl")
 
     if not os.path.exists(model_path) or not os.path.exists(stats_path):

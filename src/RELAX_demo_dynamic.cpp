@@ -46,7 +46,15 @@ std::vector<double> g_corrected_joints;     // 用于存储完整的7个修正�
 bool g_corrected_joints_received = false; // 标志位
 ros::Publisher g_obstacle_pub; 
 std::vector<double> g_last_joints;
+std::string g_csv_file_j4;   
 
+static inline bool fileExists(const std::string& p){ std::ifstream f(p.c_str()); return f.good(); }
+void ensureJ4Header(const std::string& path){
+  if (fileExists(path)) return;
+  std::ofstream ofs(path, std::ios::out);
+  ofs << "phase,point_idx,t_from_start,joint4\n";
+  ofs.close();
+}
 
 // 接收完整的7个关节值
 void correctedJointsCallback(const std_msgs::Float32MultiArray::ConstPtr& msg)
@@ -151,6 +159,58 @@ void pythonReadyCallback(const std_msgs::BoolConstPtr& msg)
         g_python_is_ready = true;
     }
 }
+
+int findJ4Index(const std::vector<std::string>& names){
+  for (size_t i=0;i<names.size();++i) if (names[i]=="panda_joint4") return static_cast<int>(i);
+  return -1;
+}
+
+void appendPlanToCsv(const std::string& path,
+                       const std::string& phase,                // "initial_plan" / "corrected_plan"
+                       const moveit_msgs::RobotTrajectory& traj)
+{
+  const auto& jt = traj.joint_trajectory;
+  if (jt.joint_names.empty() || jt.points.empty()) return;
+  int j4 = findJ4Index(jt.joint_names);
+  if (j4 < 0) return;
+
+  ensureJ4Header(path);
+  std::ofstream ofs(path, std::ios::app);
+  for (size_t p=0; p<jt.points.size(); ++p){
+    const auto& pt = jt.points[p];
+    double j4_val = (j4 < (int)pt.positions.size()) ? pt.positions[j4] : std::numeric_limits<double>::quiet_NaN();
+    double t = pt.time_from_start.toSec();
+    ofs << phase << "," << p << "," << t << "," << std::setprecision(9) << j4_val << "\n";
+  }
+  ofs.close();
+}
+
+// 保存执行时的 joint4（/joint_states）
+void appendExecutedJ4ToCsv(const std::string& path,
+                           const std::vector<sensor_msgs::JointState>& data)
+{
+  if (data.empty()) return;
+  ensureJ4Header(path);
+
+  ros::Time t0 = data.front().header.stamp;
+  std::ofstream ofs(path, std::ios::app);
+
+  int j4_hint = findJ4Index(data.front().name);
+
+  for (size_t i=0; i<data.size(); ++i){
+    const auto& msg = data[i];
+    int idx = j4_hint;
+    if (idx < 0 || idx >= (int)msg.position.size()){
+      idx = findJ4Index(msg.name);
+    }
+    double j4_val = (idx >= 0 && idx < (int)msg.position.size()) ? msg.position[idx] : std::numeric_limits<double>::quiet_NaN();
+    double dt = (msg.header.stamp - t0).toSec(); if (dt < 0) dt = 0.0;
+
+    ofs << "executed_joint_states," << i << "," << dt << "," << std::setprecision(9) << j4_val << "\n";
+  }
+  ofs.close();
+}
+
 
 float computeTrajectoryReward(const moveit_msgs::RobotTrajectory& trajectory,
                               const moveit::core::RobotModelConstPtr& robot_model,
@@ -391,6 +451,7 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
         ROS_INFO_STREAM("[RLStep] faulty_joints: " << ss.str());
     }
 
+    appendPlanToCsv(g_csv_file_j4, "initial_plan", initial_plan.trajectory_);
 
 
     // 步骤 2: 将完整的观察（关节状态 + 障碍物位置）发送给Python
@@ -450,9 +511,11 @@ bool performRLStep(moveit::planning_interface::MoveGroupInterface& move_group, c
     }
 
     // 步骤 5: 执行规划并计算奖励
-    //moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
-    logPlannedEndpointEE(final_plan.trajectory_, move_group.getRobotModel());
-    updateLastFromTrajectory(final_plan.trajectory_);
+    moveit::core::MoveItErrorCode result = move_group.execute(final_plan);
+    appendPlanToCsv(g_csv_file_j4, "corrected_plan", final_plan.trajectory_);
+
+    // logPlannedEndpointEE(final_plan.trajectory_, move_group.getRobotModel());
+    // updateLastFromTrajectory(final_plan.trajectory_);
 
     // 检查是否有小于0.2m的情况
     bool collision_risk = checkCollisionRisk(final_plan.trajectory_,
@@ -835,6 +898,9 @@ int main(int argc, char** argv)
 {
   ros::init(argc, argv, "own_pick_place_V4");
   ros::NodeHandle nh;
+  const char* home = std::getenv("HOME"); if (!home) home = "/tmp";
+  g_csv_file_j4 = std::string(home) + "/rl_joint4_logs_dynamic.csv";
+  ROS_WARN_STREAM("J4 CSV -> " << g_csv_file_j4);
 
   //Get information about robot state
   ros::AsyncSpinner spinner(2);
@@ -909,7 +975,7 @@ int main(int argc, char** argv)
   for (int i = 1; i < 51 ;i = i + 1)
   { 
     generateAndPublishObstacles();
-    updateObstaclesInPlanningScene(planning_scene_interface);
+   // updateObstaclesInPlanningScene(planning_scene_interface);
 
     std_msgs::Int32 state;
     state.data = 1;
