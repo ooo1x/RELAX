@@ -58,7 +58,7 @@ Execution in the dynamic environment: [docs/videos/dynamic.mp4](docs/videos/dyna
 
 ### Summary
 
-| Scenario             | Algorithm | Failure rate (best → worst bias) | Mean min. distance |
+| Scenario             | Algorithm | Failure rate | Mean min. distance |
 |----------------------|-----------|----------------------------------|--------------------|
 | Static / Fixed       | DDPG / TD3 | 0                         | > 0.22 m           |
 | Static / Randomized  | DDPG / TD3 | 0                    | > 0.20 m           |
