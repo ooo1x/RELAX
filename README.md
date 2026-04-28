@@ -42,19 +42,19 @@ The agent is invoked in the critical Lift (State 4) and Transport (State 5) phas
 
 Without RL correction, even a small joint bias causes frequent safety violations (end-effector entering the 0.2 m safety zone around the human proxies).
 
-Baseline execution under injected joint bias: [docs/videos/baseline.mp4](docs/videos/baseline.mp4)
+Baseline execution under injected joint bias: ![Baseline demo](docs/videos/baseline.gif)
 
 ### Static environment (DDPG / TD3)
 
 Both DDPG and TD3 converge within ~3000 timesteps and bring the failure rate down to ≤4% in the fixed-target case and ≤20% in the randomized-target case.
 
-Execution in the static environment: [docs/videos/static.mp4](docs/videos/static.mp4)
+Execution in the static environment: ![Static demo](docs/videos/static.gif)
 
 ### Dynamic environment (PPO)
 
 In the dynamic environment, only PPO converges reliably. Failure rate is reduced from up to 86% (baseline) to ≤30% under all tested bias magnitudes, while the mean minimum distance stays above 0.2 m.
 
-Execution in the dynamic environment: [docs/videos/dynamic.mp4](docs/videos/dynamic.mp4)
+Execution in the dynamic environment: ![Dynamic demo](docs/videos/dynamic.gif)
 
 ### Summary
 
