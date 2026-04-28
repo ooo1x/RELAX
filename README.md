@@ -42,12 +42,6 @@ The agent is invoked in the critical Lift (State 4) and Transport (State 5) phas
 
 Without RL correction, even a small joint bias causes frequent safety violations (end-effector entering the 0.2 m safety zone around the human proxies).
 
-| Bias (rad) | Static / Fixed | Static / Random | Dynamic / Fixed | Dynamic / Random |
-|:----------:|:--------------:|:---------------:|:---------------:|:----------------:|
-| 0.3        | 74%            | 50%             | 76%             | 78%              |
-| 0.5        | 100%           | 82%             | 70%             | 70%              |
-| 1.0        | 100%           | 96%             | 86%             | 78%              |
-
 Baseline execution under injected joint bias: [docs/videos/baseline.mp4](docs/videos/baseline.mp4)
 
 ### Static environment (DDPG / TD3)
